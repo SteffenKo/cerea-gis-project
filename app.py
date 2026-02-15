@@ -26,8 +26,7 @@ def get_fields(farm_path: Path):
 
 def export_field(
     polygon,
-    lines,
-    ordered_names,
+    ordered_lines,
     output_dir: Path,
     farm_name: str,
     field_name: str
@@ -54,12 +53,6 @@ def export_field(
     # -------------------
     # Reorder lines
     # -------------------
-    ordered_lines = []
-    for name in ordered_names:
-        for n, geom in lines:
-            if n == name:
-                ordered_lines.append((n, geom))
-
     gdf_lines = gpd.GeoDataFrame(
         [{"name": n, "geometry": geom} for n, geom in ordered_lines],
         crs="EPSG:25832"
@@ -146,6 +139,16 @@ def create_map(polygon, ordered_lines):
     return m
 
 
+@st.cache_data
+def load_field_data(contour_file, patterns_file, center_x, center_y):
+    polygon = parse_contour(contour_file, center_x, center_y)
+
+    lines = []
+    if patterns_file.exists():
+        lines = parse_patterns(patterns_file, center_x, center_y)
+
+    return polygon, lines
+
 
 
 # -----------------------------
@@ -202,49 +205,50 @@ if cerea_root_input and output_root_input:
     contour_file = field_path / "contour.txt"
     patterns_file = field_path / "patterns.txt"
 
-if contour_file.exists():
+    if contour_file.exists():
 
-    polygon = parse_contour(contour_file, center_x, center_y)
-
-    lines = []
-    if patterns_file.exists():
-        lines = parse_patterns(patterns_file, center_x, center_y)
-
-    # ---- MAP PREVIEW ----
-
-    col1, col2 = st.columns(2)
-    # Sortieurtung der Spuren per Drag & Drop
-    with col1:
-        st.subheader("Spuren-Reihenfolge")
-        if lines:
-            pattern_names = [name for name, _ in lines]
-            ordered_names = sort_items(pattern_names, direction="vertical")
-            ordered_lines = [
-                (name, dict(lines)[name])
-                for name in ordered_names
-            ]
-
-        else:
-            ordered_names = []
-    
-    # Kartenansicht mit nummerierten Spuren
-    with col2:
-        st.subheader("Kartenansicht")
-        if lines:
-            folium_map = create_map(polygon, ordered_lines)
-            st_folium(folium_map, width=600, height=600)
-        else:
-            st.info("Keine patterns.txt gefunden.")
-
-    if st.button("Exportieren für Cerea"):
-
-        export_field(
-            polygon,
-            lines,
-            ordered_names,
-            output_root,
-            selected_farm,
-            selected_field
+        polygon, lines = load_field_data(
+            contour_file,
+            patterns_file,
+            center_x,
+            center_y
         )
 
-        st.success("Export erfolgreich abgeschlossen!")
+
+        # ---- MAP PREVIEW ----
+
+        col1, col2 = st.columns(2)
+        # Sortieurtung der Spuren per Drag & Drop
+        with col1:
+            st.subheader("Spuren-Reihenfolge")
+            if lines:
+                pattern_names = [name for name, _ in lines]
+                ordered_names = sort_items(pattern_names, direction="vertical")
+                ordered_lines = [
+                    (name, dict(lines)[name])
+                    for name in ordered_names
+                ]
+
+            else:
+                ordered_names = []
+        
+        # Kartenansicht mit nummerierten Spuren
+        with col2:
+            st.subheader("Kartenansicht")
+            if lines:
+                folium_map = create_map(polygon, ordered_lines)
+                st_folium(folium_map, width=600, height=600)
+            else:
+                st.info("Keine patterns.txt gefunden.")
+
+        if st.button("Exportieren für Cerea"):
+
+            export_field(
+                polygon,
+                ordered_lines,
+                output_root,
+                selected_farm,
+                selected_field
+            )
+
+            st.success("Export erfolgreich abgeschlossen!")
