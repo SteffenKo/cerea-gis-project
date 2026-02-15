@@ -1,0 +1,6 @@
+geopandas
+shapely
+pyproj
+fiona
+streamlit
+streamlit-sortables
