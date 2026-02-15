@@ -26,7 +26,7 @@ def get_fields(farm_path: Path):
 
 def export_field(
     polygon,
-    ordered_lines,
+    ordered_line_items,
     output_dir: Path,
     farm_name: str,
     field_name: str
@@ -54,7 +54,7 @@ def export_field(
     # Reorder lines
     # -------------------
     gdf_lines = gpd.GeoDataFrame(
-        [{"name": n, "geometry": geom} for n, geom in ordered_lines],
+        [{"id": item["id"], "name": item["name"], "geometry": item["geometry"]} for item in ordered_line_items],
         crs="EPSG:25832"
     )
 
@@ -64,10 +64,10 @@ def export_field(
 
     gdf_lines.to_file(target_dir / f"{field_name}_patterns.shp")
 
-def create_map(polygon, ordered_lines):
+def create_map(polygon, ordered_line_items):
     """
     Create interactive Folium map with numbered tracks
-    ordered_lines = [(name, geometry), ...] in user-defined order
+    ordered_line_items = [{"id": int, "name": str, "geometry": geom}, ...] in user-defined order
     """
 
     gdf_poly = gpd.GeoDataFrame(
@@ -76,8 +76,8 @@ def create_map(polygon, ordered_lines):
     ).to_crs(epsg=4326)
 
     gdf_lines = gpd.GeoDataFrame(
-        [{"order": i + 1, "name": n, "geometry": geom}
-         for i, (n, geom) in enumerate(ordered_lines)],
+        [{"order": i + 1, "id": item["id"], "name": item["name"], "geometry": item["geometry"]}
+         for i, item in enumerate(ordered_line_items)],
         crs="EPSG:25832"
     ).to_crs(epsg=4326)
 
@@ -143,11 +143,15 @@ def create_map(polygon, ordered_lines):
 def load_field_data(contour_file, patterns_file, center_x, center_y):
     polygon = parse_contour(contour_file, center_x, center_y)
 
-    lines = []
+    line_items = []
     if patterns_file.exists():
-        lines = parse_patterns(patterns_file, center_x, center_y)
+        raw_lines = parse_patterns(patterns_file, center_x, center_y)
+        line_items = [
+            {"id": idx, "name": name, "geometry": geom}
+            for idx, (name, geom) in enumerate(raw_lines)
+        ]
 
-    return polygon, lines
+    return polygon, line_items
 
 
 
@@ -207,7 +211,7 @@ if cerea_root_input and output_root_input:
 
     if contour_file.exists():
 
-        polygon, lines = load_field_data(
+        polygon, line_items = load_field_data(
             contour_file,
             patterns_file,
             center_x,
@@ -221,22 +225,23 @@ if cerea_root_input and output_root_input:
         # Sortieurtung der Spuren per Drag & Drop
         with col1:
             st.subheader("Spuren-Reihenfolge")
-            if lines:
-                pattern_names = [name for name, _ in lines]
-                ordered_names = sort_items(pattern_names, direction="vertical")
-                ordered_lines = [
-                    (name, dict(lines)[name])
-                    for name in ordered_names
+            if line_items:
+                sortable_labels = [f"[{item['id']}] {item['name']}" for item in line_items]
+                ordered_labels = sort_items(sortable_labels, direction="vertical")
+                item_by_id = {item["id"]: item for item in line_items}
+                ordered_line_items = [
+                    item_by_id[int(label.split("]", 1)[0][1:])]
+                    for label in ordered_labels
                 ]
 
             else:
-                ordered_names = []
+                ordered_line_items = []
         
         # Kartenansicht mit nummerierten Spuren
         with col2:
             st.subheader("Kartenansicht")
-            if lines:
-                folium_map = create_map(polygon, ordered_lines)
+            if line_items:
+                folium_map = create_map(polygon, ordered_line_items)
                 st_folium(folium_map, width=600, height=600)
             else:
                 st.info("Keine patterns.txt gefunden.")
@@ -245,7 +250,7 @@ if cerea_root_input and output_root_input:
 
             export_field(
                 polygon,
-                ordered_lines,
+                ordered_line_items,
                 output_root,
                 selected_farm,
                 selected_field
