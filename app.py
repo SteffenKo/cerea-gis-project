@@ -137,6 +137,28 @@ def parse_field_key(key: str):
     return key.split("::", 1)
 
 
+def clone_line_items(line_items):
+    return [
+        {"id": item["id"], "name": item["name"], "geometry": item["geometry"]}
+        for item in line_items
+    ]
+
+
+def record_last_change(key: str, state):
+    st.session_state.last_change = {
+        "field_key": key,
+        "line_items": clone_line_items(state["line_items"]),
+        "dirty": state["dirty"],
+    }
+
+
+def clear_track_input_state(key: str):
+    prefix = f"track_name_{key}_"
+    for session_key in list(st.session_state.keys()):
+        if session_key.startswith(prefix):
+            del st.session_state[session_key]
+
+
 def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
     if "field_edits" not in st.session_state:
         st.session_state.field_edits = {}
@@ -148,18 +170,11 @@ def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
         st.session_state.field_edits[key] = {
             "polygon": polygon,
             "line_items": line_items,
+            "original_line_items": clone_line_items(line_items),
             "dirty": False,
         }
 
     return st.session_state.field_edits[key]
-
-
-def sort_label(item):
-    return f"{item['id']}|{item['name']}"
-
-
-def sort_id(label: str):
-    return int(label.split("|", 1)[0])
 
 
 col_a, col_b = st.columns(2)
@@ -217,75 +232,148 @@ if cerea_root_input and output_root_input:
     polygon = current_state["polygon"]
     line_items = current_state["line_items"]
 
-    col1, col2 = st.columns(2)
+    st.subheader("Rename / Delete tracks")
+    if line_items:
+        updated_items = []
+        has_rename_changes = False
+        deleted_track_id = None
 
-    with col1:
+        for item in line_items:
+            name_col, delete_col = st.columns([10, 1])
+            with name_col:
+                new_name = st.text_input(
+                    f"Track {item['id']}",
+                    value=item["name"],
+                    key=f"track_name_{current_key}_{item['id']}",
+                    label_visibility="collapsed",
+                )
+            with delete_col:
+                delete_clicked = st.button(
+                    "x",
+                    key=f"delete_track_{current_key}_{item['id']}",
+                )
+
+            if delete_clicked:
+                deleted_track_id = item["id"]
+                continue
+
+            cleaned_name = new_name.strip()
+            if not cleaned_name:
+                cleaned_name = item["name"]
+            if cleaned_name != item["name"]:
+                has_rename_changes = True
+            updated_items.append({**item, "name": cleaned_name})
+
+        if deleted_track_id is not None:
+            record_last_change(current_key, current_state)
+            current_state["line_items"] = updated_items
+            current_state["dirty"] = True
+            line_items = updated_items
+            clear_track_input_state(current_key)
+            st.success("Track deleted.")
+        elif has_rename_changes:
+            record_last_change(current_key, current_state)
+            current_state["line_items"] = updated_items
+            current_state["dirty"] = True
+            line_items = updated_items
+    else:
+        st.info("No tracks available for editing.")
+
+    reorder_col, map_col = st.columns(2)
+
+    with reorder_col:
         st.subheader("Track order")
         if line_items:
-            sortable_labels = [sort_label(item) for item in line_items]
-            ordered_labels = sort_items(sortable_labels, direction="vertical")
-            item_by_id = {item["id"]: item for item in line_items}
-            ordered_line_items = [item_by_id[sort_id(label)] for label in ordered_labels]
+            position_col, dnd_col = st.columns([1, 8])
 
-            if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
-                current_state["line_items"] = ordered_line_items
-                current_state["dirty"] = True
-                line_items = ordered_line_items
-
-        st.subheader("Edit track")
-        if line_items:
-            line_ids = [item["id"] for item in line_items]
-            select_key = f"line_select_{current_key}"
-
-            if (
-                select_key in st.session_state
-                and st.session_state[select_key] not in line_ids
-            ):
-                del st.session_state[select_key]
-
-            selected_id = st.selectbox(
-                "Select track",
-                options=line_ids,
-                format_func=lambda line_id: f"[{line_id}] {next(item['name'] for item in line_items if item['id'] == line_id)}",
-                key=select_key,
-            )
-
-            rename_value = st.text_input(
-                "New name",
-                value="",
-                key=f"rename_value_{current_key}",
-            )
-
-            if st.button("Rename track", key=f"rename_btn_{current_key}"):
-                new_name = rename_value.strip()
-                if not new_name:
-                    st.warning("Please enter a non-empty name.")
-                else:
-                    current_state["line_items"] = [
-                        {**item, "name": new_name}
-                        if item["id"] == selected_id
-                        else item
-                        for item in line_items
+            with position_col:
+                # Tune these values to match streamlit-sortables row spacing.
+                row_height_px = 36.33
+                top_offset_px = 17
+                number_font_px = 16
+                number_rows = "".join(
+                    [
+                        (
+                            f'<div style="height:{row_height_px}px;display:flex;align-items:center;'
+                            f"justify-content:center;font-weight:600;font-size:{number_font_px}px;border-bottom:1px solid #e8e8e8;"
+                            f'box-sizing:border-box;">{idx}</div>'
+                        )
+                        for idx in range(1, len(line_items) + 1)
                     ]
+                )
+                st.markdown(
+                    (
+                        f'<div style="margin-top:{top_offset_px}px;border:1px solid #e8e8e8;'
+                        'border-radius:6px;overflow:hidden;background:#ffffff;">'
+                        f"{number_rows}</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+            with dnd_col:
+                sortable_names = [item["name"] for item in line_items]
+                ordered_names = sort_items(sortable_names, direction="vertical")
+
+            name_buckets = {}
+            for item in line_items:
+                name_buckets.setdefault(item["name"], []).append(item)
+
+            ordered_line_items = []
+            for name in ordered_names:
+                bucket = name_buckets.get(name, [])
+                if bucket:
+                    ordered_line_items.append(bucket.pop(0))
+
+            if len(ordered_line_items) == len(line_items):
+                if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
+                    record_last_change(current_key, current_state)
+                    current_state["line_items"] = ordered_line_items
                     current_state["dirty"] = True
-                    st.success("Track renamed.")
-
-            if st.button("Delete track", key=f"delete_btn_{current_key}"):
-                current_state["line_items"] = [
-                    item for item in line_items if item["id"] != selected_id
-                ]
-                current_state["dirty"] = True
-                st.success("Track deleted.")
+                    line_items = ordered_line_items
         else:
-            st.info("No tracks available for editing.")
+            st.info("No tracks available for ordering.")
 
-    with col2:
+    with map_col:
         st.subheader("Map")
         if current_state["line_items"]:
             folium_map = create_map(polygon, current_state["line_items"])
             st_folium(folium_map, width=600, height=600)
         else:
             st.info("No patterns available for this field.")
+
+    reset_col, undo_col = st.columns(2)
+    with reset_col:
+        if st.button("Reset all changes"):
+            if "field_edits" not in st.session_state or not st.session_state.field_edits:
+                st.info("No loaded fields to reset.")
+            else:
+                for key, state in st.session_state.field_edits.items():
+                    state["line_items"] = clone_line_items(state["original_line_items"])
+                    state["dirty"] = False
+                    clear_track_input_state(key)
+                if "last_change" in st.session_state:
+                    del st.session_state["last_change"]
+                st.success("All changes reset.")
+
+    with undo_col:
+        if st.button("Undo last change"):
+            last_change = st.session_state.get("last_change")
+            if not last_change:
+                st.info("No change to undo.")
+            else:
+                undo_key = last_change["field_key"]
+                if (
+                    "field_edits" in st.session_state
+                    and undo_key in st.session_state.field_edits
+                ):
+                    undo_state = st.session_state.field_edits[undo_key]
+                    undo_state["line_items"] = clone_line_items(last_change["line_items"])
+                    undo_state["dirty"] = last_change["dirty"]
+                    clear_track_input_state(undo_key)
+                    st.success("Last change restored.")
+                else:
+                    st.warning("Unable to undo: field state not available.")
+                del st.session_state["last_change"]
 
     if st.button("Export current field"):
         export_field(
