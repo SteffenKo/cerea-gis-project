@@ -137,11 +137,38 @@ def parse_field_key(key: str):
     return key.split("::", 1)
 
 
+def get_track_input_versions():
+    if "track_input_versions" not in st.session_state:
+        st.session_state.track_input_versions = {}
+    return st.session_state.track_input_versions
+
+
+def get_track_input_version(key: str):
+    versions = get_track_input_versions()
+    return versions.get(key, 0)
+
+
+def bump_track_input_version(key: str):
+    versions = get_track_input_versions()
+    versions[key] = versions.get(key, 0) + 1
+
+
 def clear_track_input_state(key: str):
     prefix = f"track_name_{key}_"
     for session_key in list(st.session_state.keys()):
         if session_key.startswith(prefix):
             del st.session_state[session_key]
+    bump_track_input_version(key)
+
+
+def clear_all_track_input_state():
+    prefix = "track_name_"
+    for session_key in list(st.session_state.keys()):
+        if session_key.startswith(prefix):
+            del st.session_state[session_key]
+    versions = get_track_input_versions()
+    for key in list(versions.keys()):
+        versions[key] = versions.get(key, 0) + 1
 
 
 def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
@@ -159,6 +186,34 @@ def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
         }
 
     return st.session_state.field_edits[key]
+
+
+def reset_field_state(key, contour_file, patterns_file, center_x, center_y):
+    polygon, line_items = load_field_data(contour_file, patterns_file, center_x, center_y)
+    st.session_state.field_edits[key] = {
+        "polygon": polygon,
+        "line_items": line_items,
+        "dirty": False,
+    }
+
+
+def reset_all_field_states(cerea_root, center_x, center_y):
+    if "field_edits" not in st.session_state:
+        st.session_state.field_edits = {}
+        return 0
+
+    reset_count = 0
+    for key in list(st.session_state.field_edits.keys()):
+        farm_name, field_name = parse_field_key(key)
+        field_path = cerea_root / farm_name / field_name
+        contour_file = field_path / "contour.txt"
+        patterns_file = field_path / "patterns.txt"
+
+        if contour_file.exists():
+            reset_field_state(key, contour_file, patterns_file, center_x, center_y)
+            reset_count += 1
+
+    return reset_count
 
 
 col_a, col_b = st.columns(2)
@@ -218,6 +273,7 @@ if cerea_root_input and output_root_input:
 
     st.subheader("Rename / Delete tracks")
     if line_items:
+        current_input_version = get_track_input_version(current_key)
         updated_items = []
         has_rename_changes = False
         deleted_track_id = None
@@ -228,7 +284,7 @@ if cerea_root_input and output_root_input:
                 new_name = st.text_input(
                     f"Track {item['id']}",
                     value=item["name"],
-                    key=f"track_name_{current_key}_{item['id']}",
+                    key=f"track_name_{current_key}_{current_input_version}_{item['id']}",
                     label_visibility="collapsed",
                 )
             with delete_col:
@@ -321,6 +377,21 @@ if cerea_root_input and output_root_input:
             st_folium(folium_map, width=600, height=600)
         else:
             st.info("No patterns available for this field.")
+
+    if st.button("Reset all changes"):
+        reset_count = reset_all_field_states(cerea_root, center_x, center_y)
+        clear_all_track_input_state()
+        if reset_count:
+            st.success(f"Reset all changes in {reset_count} field(s).")
+        else:
+            st.info("No field state to reset.")
+        st.rerun()
+
+    if st.button("Reset field changes"):
+        reset_field_state(current_key, contour_file, patterns_file, center_x, center_y)
+        clear_track_input_state(current_key)
+        st.success("Field changes reset to imported data.")
+        st.rerun()
 
     if st.button("Export current field"):
         export_field(
