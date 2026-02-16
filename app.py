@@ -137,21 +137,6 @@ def parse_field_key(key: str):
     return key.split("::", 1)
 
 
-def clone_line_items(line_items):
-    return [
-        {"id": item["id"], "name": item["name"], "geometry": item["geometry"]}
-        for item in line_items
-    ]
-
-
-def record_last_change(key: str, state):
-    st.session_state.last_change = {
-        "field_key": key,
-        "line_items": clone_line_items(state["line_items"]),
-        "dirty": state["dirty"],
-    }
-
-
 def clear_track_input_state(key: str):
     prefix = f"track_name_{key}_"
     for session_key in list(st.session_state.keys()):
@@ -170,7 +155,6 @@ def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
         st.session_state.field_edits[key] = {
             "polygon": polygon,
             "line_items": line_items,
-            "original_line_items": clone_line_items(line_items),
             "dirty": False,
         }
 
@@ -265,14 +249,12 @@ if cerea_root_input and output_root_input:
             updated_items.append({**item, "name": cleaned_name})
 
         if deleted_track_id is not None:
-            record_last_change(current_key, current_state)
             current_state["line_items"] = updated_items
             current_state["dirty"] = True
             line_items = updated_items
             clear_track_input_state(current_key)
             st.success("Track deleted.")
         elif has_rename_changes:
-            record_last_change(current_key, current_state)
             current_state["line_items"] = updated_items
             current_state["dirty"] = True
             line_items = updated_items
@@ -326,7 +308,6 @@ if cerea_root_input and output_root_input:
 
             if len(ordered_line_items) == len(line_items):
                 if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
-                    record_last_change(current_key, current_state)
                     current_state["line_items"] = ordered_line_items
                     current_state["dirty"] = True
                     line_items = ordered_line_items
@@ -340,40 +321,6 @@ if cerea_root_input and output_root_input:
             st_folium(folium_map, width=600, height=600)
         else:
             st.info("No patterns available for this field.")
-
-    reset_col, undo_col = st.columns(2)
-    with reset_col:
-        if st.button("Reset all changes"):
-            if "field_edits" not in st.session_state or not st.session_state.field_edits:
-                st.info("No loaded fields to reset.")
-            else:
-                for key, state in st.session_state.field_edits.items():
-                    state["line_items"] = clone_line_items(state["original_line_items"])
-                    state["dirty"] = False
-                    clear_track_input_state(key)
-                if "last_change" in st.session_state:
-                    del st.session_state["last_change"]
-                st.success("All changes reset.")
-
-    with undo_col:
-        if st.button("Undo last change"):
-            last_change = st.session_state.get("last_change")
-            if not last_change:
-                st.info("No change to undo.")
-            else:
-                undo_key = last_change["field_key"]
-                if (
-                    "field_edits" in st.session_state
-                    and undo_key in st.session_state.field_edits
-                ):
-                    undo_state = st.session_state.field_edits[undo_key]
-                    undo_state["line_items"] = clone_line_items(last_change["line_items"])
-                    undo_state["dirty"] = last_change["dirty"]
-                    clear_track_input_state(undo_key)
-                    st.success("Last change restored.")
-                else:
-                    st.warning("Unable to undo: field state not available.")
-                del st.session_state["last_change"]
 
     if st.button("Export current field"):
         export_field(
