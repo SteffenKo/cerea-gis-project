@@ -11,6 +11,22 @@ from src.cerea_gis.universe import read_center
 
 st.set_page_config(layout="wide")
 st.title("Cerea GIS Converter")
+st.markdown(
+    """
+    <style>
+    div[data-testid="stButton"] {
+        margin-top: 0.0rem;
+        margin-bottom: 0.0rem;
+    }
+    div[data-testid="stButton"] > button {
+        padding-top: 0.15rem;
+        padding-bottom: 0.15rem;
+        min-height: 1.9rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def get_farms(cerea_root: Path):
@@ -254,175 +270,215 @@ if cerea_root_input and output_root_input:
         st.warning("No fields found in selected farm.")
         st.stop()
 
-    selected_field = st.selectbox("Select field", field_names)
-    field_path = farm_path / selected_field
+    if "selected_field_by_farm" not in st.session_state:
+        st.session_state.selected_field_by_farm = {}
 
-    contour_file = field_path / "contour.txt"
-    patterns_file = field_path / "patterns.txt"
+    if (
+        selected_farm not in st.session_state.selected_field_by_farm
+        or st.session_state.selected_field_by_farm[selected_farm] not in field_names
+    ):
+        st.session_state.selected_field_by_farm[selected_farm] = field_names[0]
 
-    if not contour_file.exists():
-        st.warning("contour.txt not found.")
-        st.stop()
+    field_panel_col, editor_col = st.columns([1, 3])
 
-    current_key = field_key(selected_farm, selected_field)
-    current_state = ensure_field_state(
-        current_key, contour_file, patterns_file, center_x, center_y
-    )
-    polygon = current_state["polygon"]
-    line_items = current_state["line_items"]
+    with field_panel_col:
+        st.subheader("Fields")
+        st.caption("Yellow dot = edited field")
 
-    st.subheader("Rename / Delete tracks")
-    if line_items:
-        current_input_version = get_track_input_version(current_key)
-        updated_items = []
-        has_rename_changes = False
-        deleted_track_id = None
-
-        for item in line_items:
-            name_col, delete_col = st.columns([10, 1])
-            with name_col:
-                new_name = st.text_input(
-                    f"Track {item['id']}",
-                    value=item["name"],
-                    key=f"track_name_{current_key}_{current_input_version}_{item['id']}",
-                    label_visibility="collapsed",
-                )
-            with delete_col:
-                delete_clicked = st.button(
-                    "x",
-                    key=f"delete_track_{current_key}_{item['id']}",
-                )
-
-            if delete_clicked:
-                deleted_track_id = item["id"]
-                continue
-
-            cleaned_name = new_name.strip()
-            if not cleaned_name:
-                cleaned_name = item["name"]
-            if cleaned_name != item["name"]:
-                has_rename_changes = True
-            updated_items.append({**item, "name": cleaned_name})
-
-        if deleted_track_id is not None:
-            current_state["line_items"] = updated_items
-            current_state["dirty"] = True
-            line_items = updated_items
-            clear_track_input_state(current_key)
-            st.success("Track deleted.")
-        elif has_rename_changes:
-            current_state["line_items"] = updated_items
-            current_state["dirty"] = True
-            line_items = updated_items
-    else:
-        st.info("No tracks available for editing.")
-
-    reorder_col, map_col = st.columns(2)
-
-    with reorder_col:
-        st.subheader("Track order")
-        if line_items:
-            position_col, dnd_col = st.columns([1, 8])
-
-            with position_col:
-                # Tune these values to match streamlit-sortables row spacing.
-                row_height_px = 36.33
-                top_offset_px = 17
-                number_font_px = 16
-                number_rows = "".join(
-                    [
-                        (
-                            f'<div style="height:{row_height_px}px;display:flex;align-items:center;'
-                            f"justify-content:center;font-weight:600;font-size:{number_font_px}px;border-bottom:1px solid #e8e8e8;"
-                            f'box-sizing:border-box;">{idx}</div>'
-                        )
-                        for idx in range(1, len(line_items) + 1)
-                    ]
-                )
-                st.markdown(
-                    (
-                        f'<div style="margin-top:{top_offset_px}px;border:1px solid #e8e8e8;'
-                        'border-radius:6px;overflow:hidden;background:#ffffff;">'
-                        f"{number_rows}</div>"
-                    ),
-                    unsafe_allow_html=True,
-                )
-
-            with dnd_col:
-                sortable_names = [item["name"] for item in line_items]
-                ordered_names = sort_items(sortable_names, direction="vertical")
-
-            name_buckets = {}
-            for item in line_items:
-                name_buckets.setdefault(item["name"], []).append(item)
-
-            ordered_line_items = []
-            for name in ordered_names:
-                bucket = name_buckets.get(name, [])
-                if bucket:
-                    ordered_line_items.append(bucket.pop(0))
-
-            if len(ordered_line_items) == len(line_items):
-                if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
-                    current_state["line_items"] = ordered_line_items
-                    current_state["dirty"] = True
-                    line_items = ordered_line_items
-        else:
-            st.info("No tracks available for ordering.")
-
-    with map_col:
-        st.subheader("Map")
-        if current_state["line_items"]:
-            folium_map = create_map(polygon, current_state["line_items"])
-            st_folium(folium_map, width=600, height=600)
-        else:
-            st.info("No patterns available for this field.")
-
-    if st.button("Reset all changes"):
-        reset_count = reset_all_field_states(cerea_root, center_x, center_y)
-        clear_all_track_input_state()
-        if reset_count:
-            st.success(f"Reset all changes in {reset_count} field(s).")
-        else:
-            st.info("No field state to reset.")
-        st.rerun()
-
-    if st.button("Reset field changes"):
-        reset_field_state(current_key, contour_file, patterns_file, center_x, center_y)
-        clear_track_input_state(current_key)
-        st.success("Field changes reset to imported data.")
-        st.rerun()
-
-    if st.button("Export current field"):
-        export_field(
-            polygon,
-            current_state["line_items"],
-            output_root,
-            selected_farm,
-            selected_field,
-        )
-        current_state["dirty"] = False
-        st.success("Current field exported.")
-
-    if st.button("Export all changes"):
-        changed_keys = [
-            key
-            for key, state in st.session_state.field_edits.items()
-            if state["dirty"]
-        ]
-        if not changed_keys:
-            st.info("No changed fields to export.")
-        else:
-            for key in changed_keys:
-                farm_name, field_name = parse_field_key(key)
-                state = st.session_state.field_edits[key]
-                export_field(
-                    state["polygon"],
-                    state["line_items"],
-                    output_root,
-                    farm_name,
+        selected_field = st.session_state.selected_field_by_farm[selected_farm]
+        for field_name in field_names:
+            key = field_key(selected_farm, field_name)
+            is_dirty = (
+                "field_edits" in st.session_state
+                and key in st.session_state.field_edits
+                and st.session_state.field_edits[key]["dirty"]
+            )
+            dot_col, btn_col = st.columns([1, 8], gap="small")
+            with dot_col:
+                if is_dirty:
+                    st.markdown(
+                        '<div style="text-align:center;font-size:18px;color:#f9a825;line-height:28px;">&#9679;</div>',
+                        unsafe_allow_html=True,
+                    )
+            with btn_col:
+                if st.button(
                     field_name,
-                )
-                state["dirty"] = False
+                    key=f"field_btn_{selected_farm}_{field_name}",
+                    use_container_width=True,
+                    type="primary" if field_name == selected_field else "secondary",
+                ):
+                    st.session_state.selected_field_by_farm[selected_farm] = field_name
+                    selected_field = field_name
 
-            st.success(f"Exported {len(changed_keys)} changed field(s).")
+    with editor_col:
+        field_path = farm_path / selected_field
+
+        contour_file = field_path / "contour.txt"
+        patterns_file = field_path / "patterns.txt"
+
+        if not contour_file.exists():
+            st.warning("contour.txt not found.")
+            st.stop()
+
+        current_key = field_key(selected_farm, selected_field)
+        current_state = ensure_field_state(
+            current_key, contour_file, patterns_file, center_x, center_y
+        )
+        polygon = current_state["polygon"]
+        line_items = current_state["line_items"]
+
+        st.subheader("Rename / Delete tracks")
+        if line_items:
+            current_input_version = get_track_input_version(current_key)
+            updated_items = []
+            has_rename_changes = False
+            deleted_track_id = None
+
+            for item in line_items:
+                name_col, delete_col = st.columns([10, 1])
+                with name_col:
+                    new_name = st.text_input(
+                        f"Track {item['id']}",
+                        value=item["name"],
+                        key=f"track_name_{current_key}_{current_input_version}_{item['id']}",
+                        label_visibility="collapsed",
+                    )
+                with delete_col:
+                    delete_clicked = st.button(
+                        "x",
+                        key=f"delete_track_{current_key}_{item['id']}",
+                    )
+
+                if delete_clicked:
+                    deleted_track_id = item["id"]
+                    continue
+
+                cleaned_name = new_name.strip()
+                if not cleaned_name:
+                    cleaned_name = item["name"]
+                if cleaned_name != item["name"]:
+                    has_rename_changes = True
+                updated_items.append({**item, "name": cleaned_name})
+
+            if deleted_track_id is not None:
+                current_state["line_items"] = updated_items
+                current_state["dirty"] = True
+                line_items = updated_items
+                clear_track_input_state(current_key)
+                st.success("Track deleted.")
+            elif has_rename_changes:
+                current_state["line_items"] = updated_items
+                current_state["dirty"] = True
+                line_items = updated_items
+        else:
+            st.info("No tracks available for editing.")
+
+        reorder_col, map_col = st.columns(2)
+
+        with reorder_col:
+            st.subheader("Track order")
+            if line_items:
+                position_col, dnd_col = st.columns([1, 8])
+
+                with position_col:
+                    # Tune these values to match streamlit-sortables row spacing.
+                    row_height_px = 36.33
+                    top_offset_px = 17
+                    number_font_px = 16
+                    number_rows = "".join(
+                        [
+                            (
+                                f'<div style="height:{row_height_px}px;display:flex;align-items:center;'
+                                f"justify-content:center;font-weight:600;font-size:{number_font_px}px;border-bottom:1px solid #e8e8e8;"
+                                f'box-sizing:border-box;">{idx}</div>'
+                            )
+                            for idx in range(1, len(line_items) + 1)
+                        ]
+                    )
+                    st.markdown(
+                        (
+                            f'<div style="margin-top:{top_offset_px}px;border:1px solid #e8e8e8;'
+                            'border-radius:6px;overflow:hidden;background:#ffffff;">'
+                            f"{number_rows}</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
+
+                with dnd_col:
+                    sortable_names = [item["name"] for item in line_items]
+                    ordered_names = sort_items(sortable_names, direction="vertical")
+
+                name_buckets = {}
+                for item in line_items:
+                    name_buckets.setdefault(item["name"], []).append(item)
+
+                ordered_line_items = []
+                for name in ordered_names:
+                    bucket = name_buckets.get(name, [])
+                    if bucket:
+                        ordered_line_items.append(bucket.pop(0))
+
+                if len(ordered_line_items) == len(line_items):
+                    if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
+                        current_state["line_items"] = ordered_line_items
+                        current_state["dirty"] = True
+                        line_items = ordered_line_items
+            else:
+                st.info("No tracks available for ordering.")
+
+        with map_col:
+            st.subheader("Map")
+            if current_state["line_items"]:
+                folium_map = create_map(polygon, current_state["line_items"])
+                st_folium(folium_map, width=600, height=600)
+            else:
+                st.info("No patterns available for this field.")
+
+        if st.button("Reset all changes"):
+            reset_count = reset_all_field_states(cerea_root, center_x, center_y)
+            clear_all_track_input_state()
+            if reset_count:
+                st.success(f"Reset all changes in {reset_count} field(s).")
+            else:
+                st.info("No field state to reset.")
+            st.rerun()
+
+        if st.button("Reset field changes"):
+            reset_field_state(current_key, contour_file, patterns_file, center_x, center_y)
+            clear_track_input_state(current_key)
+            st.success("Field changes reset to imported data.")
+            st.rerun()
+
+        if st.button("Export current field"):
+            export_field(
+                polygon,
+                current_state["line_items"],
+                output_root,
+                selected_farm,
+                selected_field,
+            )
+            current_state["dirty"] = False
+            st.success("Current field exported.")
+
+        if st.button("Export all changes"):
+            changed_keys = [
+                key
+                for key, state in st.session_state.field_edits.items()
+                if state["dirty"]
+            ]
+            if not changed_keys:
+                st.info("No changed fields to export.")
+            else:
+                for key in changed_keys:
+                    farm_name, field_name = parse_field_key(key)
+                    state = st.session_state.field_edits[key]
+                    export_field(
+                        state["polygon"],
+                        state["line_items"],
+                        output_root,
+                        farm_name,
+                        field_name,
+                    )
+                    state["dirty"] = False
+
+                st.success(f"Exported {len(changed_keys)} changed field(s).")
