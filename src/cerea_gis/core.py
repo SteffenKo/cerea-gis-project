@@ -2,13 +2,13 @@ from pathlib import Path
 from .universe import read_center
 from .contour import parse_contour
 from .patterns import parse_patterns
-from .exporter import export_polygon, export_lines
+from .exporter import export_field_geometries
 
 
 def process_cerea_root(cerea_root: Path, output_root: Path):
     """
     Processes complete Cerea directory structure.
-    Mirrors structure into output directory.
+    Exports to farm-level folders in output directory.
     """
 
     universe_path = cerea_root / "universe.txt"
@@ -47,11 +47,10 @@ def process_cerea_root(cerea_root: Path, output_root: Path):
             if patterns_file.exists():
                 lines = parse_patterns(patterns_file, center_x, center_y)
 
-            # Create mirrored output path
-            target_dir = output_root / farm_dir.name / field_dir.name
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            export_polygon(polygon, target_dir / f"{field_dir.name}_contour.shp")
-
-            if lines:
-                export_lines(lines, target_dir / f"{field_dir.name}_pattern.shp")
+            export_field_geometries(
+                polygon=polygon,
+                lines=lines,
+                output_root=output_root,
+                farm_name=farm_dir.name,
+                field_name=field_dir.name,
+            )

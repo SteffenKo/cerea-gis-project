@@ -44,12 +44,15 @@ def export_field(
     farm_name: str,
     field_name: str,
 ):
-    target_dir = output_dir / farm_name / field_name
-    target_dir.mkdir(parents=True, exist_ok=True)
+    farm_dir = output_dir / farm_name
+    contours_dir = farm_dir / "contours"
+    patterns_dir = farm_dir / "patterns"
+    contours_dir.mkdir(parents=True, exist_ok=True)
+    patterns_dir.mkdir(parents=True, exist_ok=True)
 
     gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832")
     gdf_poly = gdf_poly.to_crs(epsg=4326)
-    gdf_poly.to_file(target_dir / f"{field_name}_contour.shp")
+    gdf_poly.to_file(contours_dir / f"{field_name}_contour.shp")
 
     gdf_lines = gpd.GeoDataFrame(
         [
@@ -60,7 +63,7 @@ def export_field(
     )
     gdf_lines = gdf_lines.to_crs(epsg=4326)
     gdf_lines.reset_index(drop=True, inplace=True)
-    gdf_lines.to_file(target_dir / f"{field_name}_patterns.shp")
+    gdf_lines.to_file(patterns_dir / f"{field_name}_patterns.shp")
 
 
 def create_map(polygon, ordered_line_items):
@@ -230,6 +233,42 @@ def reset_all_field_states(cerea_root, center_x, center_y):
             reset_count += 1
 
     return reset_count
+
+
+def export_all_fields(cerea_root, output_root, center_x, center_y):
+    exported_count = 0
+    for farm_dir in get_farms(cerea_root):
+        for field_dir in get_fields(farm_dir):
+            contour_file = field_dir / "contour.txt"
+            if not contour_file.exists():
+                continue
+
+            patterns_file = field_dir / "patterns.txt"
+            key = field_key(farm_dir.name, field_dir.name)
+
+            if "field_edits" in st.session_state and key in st.session_state.field_edits:
+                state = st.session_state.field_edits[key]
+                polygon = state["polygon"]
+                line_items = state["line_items"]
+            else:
+                polygon, line_items = load_field_data(
+                    contour_file, patterns_file, center_x, center_y
+                )
+
+            export_field(
+                polygon,
+                line_items,
+                output_root,
+                farm_dir.name,
+                field_dir.name,
+            )
+
+            if "field_edits" in st.session_state and key in st.session_state.field_edits:
+                st.session_state.field_edits[key]["dirty"] = False
+
+            exported_count += 1
+
+    return exported_count
 
 
 col_a, col_b = st.columns(2)
@@ -449,36 +488,47 @@ if cerea_root_input and output_root_input:
             st.success("Field changes reset to imported data.")
             st.rerun()
 
-        if st.button("Export current field"):
-            export_field(
-                polygon,
-                current_state["line_items"],
-                output_root,
-                selected_farm,
-                selected_field,
-            )
-            current_state["dirty"] = False
-            st.success("Current field exported.")
+        export_col_1, export_col_2, export_col_3 = st.columns(3)
 
-        if st.button("Export all changes"):
-            changed_keys = [
-                key
-                for key, state in st.session_state.field_edits.items()
-                if state["dirty"]
-            ]
-            if not changed_keys:
-                st.info("No changed fields to export.")
-            else:
-                for key in changed_keys:
-                    farm_name, field_name = parse_field_key(key)
-                    state = st.session_state.field_edits[key]
-                    export_field(
-                        state["polygon"],
-                        state["line_items"],
-                        output_root,
-                        farm_name,
-                        field_name,
-                    )
-                    state["dirty"] = False
+        with export_col_1:
+            if st.button("Export current field", use_container_width=True):
+                export_field(
+                    polygon,
+                    current_state["line_items"],
+                    output_root,
+                    selected_farm,
+                    selected_field,
+                )
+                current_state["dirty"] = False
+                st.success("Current field exported.")
 
-                st.success(f"Exported {len(changed_keys)} changed field(s).")
+        with export_col_2:
+            if st.button("Export all fields", use_container_width=True):
+                exported_count = export_all_fields(
+                    cerea_root, output_root, center_x, center_y
+                )
+                st.success(f"Exported {exported_count} field(s).")
+
+        with export_col_3:
+            if st.button("Export all changes", use_container_width=True):
+                changed_keys = [
+                    key
+                    for key, state in st.session_state.field_edits.items()
+                    if state["dirty"]
+                ]
+                if not changed_keys:
+                    st.info("No changed fields to export.")
+                else:
+                    for key in changed_keys:
+                        farm_name, field_name = parse_field_key(key)
+                        state = st.session_state.field_edits[key]
+                        export_field(
+                            state["polygon"],
+                            state["line_items"],
+                            output_root,
+                            farm_name,
+                            field_name,
+                        )
+                        state["dirty"] = False
+
+                    st.success(f"Exported {len(changed_keys)} changed field(s).")

@@ -38,3 +38,28 @@ def export_lines(lines, output_path: Path, order=None):
 
     gdf.to_file(output_path)
 
+
+def export_field_geometries(
+    polygon,
+    lines,
+    output_root: Path,
+    farm_name: str,
+    field_name: str,
+):
+    """
+    Exports one field into farm-level folders:
+    - {output_root}/{farm_name}/contours/{field_name}_contour.shp
+    - {output_root}/{farm_name}/patterns/{field_name}_patterns.shp
+    """
+    farm_dir = output_root / farm_name
+    contours_dir = farm_dir / "contours"
+    patterns_dir = farm_dir / "patterns"
+
+    contours_dir.mkdir(parents=True, exist_ok=True)
+    patterns_dir.mkdir(parents=True, exist_ok=True)
+
+    export_polygon(polygon, contours_dir / f"{field_name}_contour.shp")
+
+    if lines:
+        export_lines(lines, patterns_dir / f"{field_name}_patterns.shp")
+
