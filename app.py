@@ -20,11 +20,11 @@ st.markdown(
     """
     <style>
     div[data-testid="stButton"] {
-        margin-top: 0.0rem;
+        margin-top: -0.75rem;
         margin-bottom: 0.0rem;
     }
     div[data-testid="stButton"] > button {
-        padding-top: 0.15rem;
+        padding-top: 0.21rem;
         padding-bottom: 0.15rem;
         min-height: 1.9rem;
     }
@@ -163,6 +163,10 @@ def validate_import_structure(import_mode: str, root_path: Path):
                     )
 
     return {"issues": issues, "warnings": warnings, "stats": stats}
+
+
+def safe_widget_suffix(value: str):
+    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
 
 
 def export_field(
@@ -503,6 +507,8 @@ with input_col:
 with check_col:
     st.caption("Input structure check appears after upload.")
 
+st.divider()
+
 if uploaded_input_zip is not None:
     extracted_root = prepare_uploaded_root(uploaded_input_zip)
     cerea_root = resolve_import_root(extracted_root, import_mode)
@@ -546,7 +552,8 @@ if uploaded_input_zip is not None:
     field_panel_col, editor_col = st.columns([1, 3])
 
     with field_panel_col:
-        selected_farm = st.selectbox("Select farm", farm_names)
+        st.subheader("Farm")
+        selected_farm = st.selectbox("Farm", farm_names, label_visibility="collapsed")
         farm_path = cerea_root / selected_farm
         st.divider()
 
@@ -571,9 +578,10 @@ if uploaded_input_zip is not None:
 
     with field_panel_col:
         st.subheader("Fields")
-        st.caption("Yellow dot = edited field")
+        st.caption("Edited fields are highlighted in yellow.")
 
         selected_field = st.session_state.selected_field_by_farm[farm_session_key]
+        highlighted_button_keys = []
         for field_name in field_names:
             key = field_key(import_mode, selected_farm, field_name)
             is_dirty = (
@@ -581,22 +589,44 @@ if uploaded_input_zip is not None:
                 and key in st.session_state.field_edits
                 and st.session_state.field_edits[key]["dirty"]
             )
-            dot_col, btn_col = st.columns([1, 8], gap="small")
-            with dot_col:
-                if is_dirty:
-                    st.markdown(
-                        '<div style="text-align:center;font-size:18px;color:#f9a825;line-height:28px;">&#9679;</div>',
-                        unsafe_allow_html=True,
-                    )
-            with btn_col:
-                if st.button(
-                    field_name,
-                    key=f"field_btn_{selected_farm}_{field_name}",
-                    use_container_width=True,
-                    type="primary" if field_name == selected_field else "secondary",
-                ):
-                    st.session_state.selected_field_by_farm[farm_session_key] = field_name
-                    selected_field = field_name
+            btn_key_suffix = safe_widget_suffix(
+                f"{import_mode}_{selected_farm}_{field_name}"
+            )
+            btn_key = f"field_btn_{btn_key_suffix}"
+            is_selected = field_name == selected_field
+
+            if is_dirty and not is_selected:
+                highlighted_button_keys.append(btn_key)
+
+            if st.button(
+                field_name,
+                key=btn_key,
+                use_container_width=True,
+                type="primary" if is_selected else "secondary",
+            ):
+                st.session_state.selected_field_by_farm[farm_session_key] = field_name
+                selected_field = field_name
+
+        if highlighted_button_keys:
+            style_rules = []
+            for btn_key in highlighted_button_keys:
+                style_rules.append(
+                    f"""
+                    div.st-key-{btn_key} button {{
+                        background-color: #f9a825 !important;
+                        color: #1f1f1f !important;
+                        border-color: #f9a825 !important;
+                    }}
+                    div.st-key-{btn_key} button:hover {{
+                        background-color: #fbc34a !important;
+                        border-color: #fbc34a !important;
+                    }}
+                    """
+                )
+            st.markdown(
+                f"<style>{''.join(style_rules)}</style>",
+                unsafe_allow_html=True,
+            )
 
     with editor_col:
         contour_file, patterns_file = get_field_sources(
@@ -623,6 +653,7 @@ if uploaded_input_zip is not None:
         polygon = current_state["polygon"]
         line_items = current_state["line_items"]
 
+        st.subheader(f"Field: {selected_field}")
         st.subheader("Rename / Delete tracks")
         if line_items:
             current_input_version = get_track_input_version(current_key)
@@ -669,6 +700,13 @@ if uploaded_input_zip is not None:
         else:
             st.info("No tracks available for editing.")
 
+        row_height_px = 36.33
+        top_offset_px = 17
+        map_height = 430
+        if line_items:
+            dnd_block_height = top_offset_px + (row_height_px * len(line_items))
+            map_height = max(430, min(900, int(dnd_block_height + 110)))
+
         reorder_col, map_col = st.columns(2)
 
         with reorder_col:
@@ -678,8 +716,6 @@ if uploaded_input_zip is not None:
 
                 with position_col:
                     # Tune these values to match streamlit-sortables row spacing.
-                    row_height_px = 36.33
-                    top_offset_px = 17
                     number_font_px = 16
                     number_rows = "".join(
                         [
@@ -726,7 +762,7 @@ if uploaded_input_zip is not None:
             st.subheader("Map")
             if current_state["line_items"]:
                 folium_map = create_map(polygon, current_state["line_items"])
-                st_folium(folium_map, width=600, height=600)
+                st_folium(folium_map, width=600, height=map_height)
             else:
                 st.info("No patterns available for this field.")
 
