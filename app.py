@@ -169,6 +169,53 @@ def safe_widget_suffix(value: str):
     return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
 
 
+if hasattr(st, "dialog"):
+    @st.dialog("Rename track")
+    def show_rename_dialog(field_state_key: str, track_id: int):
+        state = st.session_state.get("field_edits", {}).get(field_state_key)
+        if not state:
+            st.warning("Field state not available.")
+            if st.button("Close", use_container_width=True):
+                st.session_state.pop("rename_target", None)
+                st.rerun()
+            return
+
+        track = next(
+            (item for item in state["line_items"] if item["id"] == track_id),
+            None,
+        )
+        if not track:
+            st.warning("Track not found.")
+            if st.button("Close", use_container_width=True):
+                st.session_state.pop("rename_target", None)
+                st.rerun()
+            return
+
+        input_key = f"rename_dialog_{safe_widget_suffix(field_state_key)}_{track_id}"
+        new_name = st.text_input("New name", value=track["name"], key=input_key)
+
+        apply_col, cancel_col = st.columns(2)
+        with apply_col:
+            if st.button("Apply", use_container_width=True):
+                cleaned_name = new_name.strip()
+                if not cleaned_name:
+                    st.warning("Please enter a non-empty name.")
+                else:
+                    state["line_items"] = [
+                        {**item, "name": cleaned_name}
+                        if item["id"] == track_id
+                        else item
+                        for item in state["line_items"]
+                    ]
+                    state["dirty"] = True
+                    st.session_state.pop("rename_target", None)
+                    st.rerun()
+        with cancel_col:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.pop("rename_target", None)
+                st.rerun()
+
+
 def export_field(
     polygon,
     ordered_line_items,
@@ -654,117 +701,197 @@ if uploaded_input_zip is not None:
         line_items = current_state["line_items"]
 
         st.subheader(f"Field: {selected_field}")
-        st.subheader("Rename / Delete tracks")
-        if line_items:
-            current_input_version = get_track_input_version(current_key)
-            updated_items = []
-            has_rename_changes = False
-            deleted_track_id = None
-
-            for item in line_items:
-                name_col, delete_col = st.columns([10, 1])
-                with name_col:
-                    new_name = st.text_input(
-                        f"Track {item['id']}",
-                        value=item["name"],
-                        key=f"track_name_{current_key}_{current_input_version}_{item['id']}",
-                        label_visibility="collapsed",
-                    )
-                with delete_col:
-                    delete_clicked = st.button(
-                        "x",
-                        key=f"delete_track_{current_key}_{item['id']}",
-                    )
-
-                if delete_clicked:
-                    deleted_track_id = item["id"]
-                    continue
-
-                cleaned_name = new_name.strip()
-                if not cleaned_name:
-                    cleaned_name = item["name"]
-                if cleaned_name != item["name"]:
-                    has_rename_changes = True
-                updated_items.append({**item, "name": cleaned_name})
-
-            if deleted_track_id is not None:
-                current_state["line_items"] = updated_items
-                current_state["dirty"] = True
-                line_items = updated_items
-                clear_track_input_state(current_key)
-                st.success("Track deleted.")
-            elif has_rename_changes:
-                current_state["line_items"] = updated_items
-                current_state["dirty"] = True
-                line_items = updated_items
-        else:
+        if not line_items:
             st.info("No tracks available for editing.")
+        else:
+            # streamlit_sortables frontend metrics (v0.3.1):
+            # container padding: 10px, body padding: 3px, item margin: 5px,
+            # item inner height: ~32px
+            sortable_container_padding_px = 10
+            sortable_body_padding_px = 3
+            sortable_item_margin_px = 5
+            row_height_px = 32
+            row_stride_px = row_height_px + (2 * sortable_item_margin_px)
+            number_font_px = 16
+            list_block_height = int(
+                sortable_container_padding_px
+                + (2 * sortable_body_padding_px)
+                + (row_stride_px * len(line_items))
+            )
+            map_height = max(430, min(900, int(list_block_height + 170)))
 
-        row_height_px = 36.33
-        top_offset_px = 17
-        map_height = 430
-        if line_items:
-            dnd_block_height = top_offset_px + (row_height_px * len(line_items))
-            map_height = max(430, min(900, int(dnd_block_height + 110)))
+            deleted_track_id = None
+            original_line_items = list(line_items)
+            ordered_line_items = list(line_items)
+            current_key_safe = safe_widget_suffix(current_key)
 
-        reorder_col, map_col = st.columns(2)
+            num_col, del_col, rename_col, dnd_col, map_col = st.columns(
+                [0.7, 0.7, 0.7, 3.5, 6.0],
+                gap="xxsmall",
+            )
 
-        with reorder_col:
-            st.subheader("Track order")
-            if line_items:
-                position_col, dnd_col = st.columns([1, 8])
-
-                with position_col:
-                    # Tune these values to match streamlit-sortables row spacing.
-                    number_font_px = 16
-                    number_rows = "".join(
-                        [
-                            (
-                                f'<div style="height:{row_height_px}px;display:flex;align-items:center;'
-                                f"justify-content:center;font-weight:600;font-size:{number_font_px}px;border-bottom:1px solid #e8e8e8;"
-                                f'box-sizing:border-box;">{idx}</div>'
-                            )
-                            for idx in range(1, len(line_items) + 1)
-                        ]
-                    )
-                    st.markdown(
-                        (
-                            f'<div style="margin-top:{top_offset_px}px;border:1px solid #e8e8e8;'
-                            'border-radius:6px;overflow:hidden;background:#ffffff;">'
-                            f"{number_rows}</div>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
-
-                with dnd_col:
-                    sortable_names = [item["name"] for item in line_items]
-                    ordered_names = sort_items(sortable_names, direction="vertical")
+            with dnd_col:
+                st.markdown(
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Order</div>',
+                    unsafe_allow_html=True,
+                )
+                sortable_names = [item["name"] for item in line_items]
+                ordered_names = sort_items(sortable_names, direction="vertical")
 
                 name_buckets = {}
                 for item in line_items:
                     name_buckets.setdefault(item["name"], []).append(item)
 
-                ordered_line_items = []
+                resolved_items = []
                 for name in ordered_names:
                     bucket = name_buckets.get(name, [])
                     if bucket:
-                        ordered_line_items.append(bucket.pop(0))
+                        resolved_items.append(bucket.pop(0))
 
-                if len(ordered_line_items) == len(line_items):
-                    if [i["id"] for i in ordered_line_items] != [i["id"] for i in line_items]:
-                        current_state["line_items"] = ordered_line_items
-                        current_state["dirty"] = True
-                        line_items = ordered_line_items
-            else:
-                st.info("No tracks available for ordering.")
+                if len(resolved_items) == len(line_items):
+                    ordered_line_items = resolved_items
 
-        with map_col:
-            st.subheader("Map")
-            if current_state["line_items"]:
-                folium_map = create_map(polygon, current_state["line_items"])
-                st_folium(folium_map, width=600, height=map_height)
+            display_items = ordered_line_items
+
+            style_rules = []
+            for item in display_items:
+                delete_btn_key = f"delete_track_{current_key_safe}_{item['id']}"
+                rename_btn_key = f"rename_open_{current_key_safe}_{item['id']}"
+                style_rules.append(
+                    f"""
+                    div.st-key-{delete_btn_key},
+                    div.st-key-{rename_btn_key} {{
+                        margin: 0 0 -11px 0 !important;
+                        padding: 0 !important;
+                    }}
+                    div.st-key-{delete_btn_key} div[data-testid="stButton"],
+                    div.st-key-{rename_btn_key} div[data-testid="stButton"] {{
+                        margin: 0 !important;
+                        padding: 0 !important;
+                    }}
+                    div.st-key-{delete_btn_key} button,
+                    div.st-key-{rename_btn_key} button {{
+                        height: {row_height_px}px !important;
+                        min-height: {row_height_px}px !important;
+                        width: {row_height_px}px !important;
+                        min-width: {row_height_px}px !important;
+                        max-width: {row_height_px}px !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        border: 1px solid #e8e8e8 !important;
+                        border-radius: 0 !important;
+                        background: #ffffff !important;
+                        color: #1f1f1f !important;
+                        box-shadow: none !important;
+                    }}
+                    div.st-key-{delete_btn_key} button {{
+                        margin-left: auto !important;
+                        margin-right: auto !important;
+                        display: block !important;
+                    }}
+                    div.st-key-{rename_btn_key} button {{
+                        margin-left: auto !important;
+                        margin-right: auto !important;
+                        display: block !important;
+                    }}
+                    """
+                )
+            if style_rules:
+                st.markdown(f"<style>{''.join(style_rules)}</style>", unsafe_allow_html=True)
+
+            with num_col:
+                st.markdown(
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">#</div>',
+                    unsafe_allow_html=True,
+                )
+                number_rows = "".join(
+                        [
+                        (
+                            f'<div style="height:{row_height_px}px;width:{row_height_px}px;margin:{sortable_item_margin_px}px auto;display:flex;align-items:center;'
+                            f"justify-content:center;font-weight:600;font-size:{number_font_px}px;border:1px solid #e8e8e8;"
+                            f'box-sizing:border-box;">{idx}</div>'
+                        )
+                        for idx in range(1, len(display_items) + 1)
+                    ]
+                )
+                st.markdown(
+                    (
+                        f' <div style="margin-top:{sortable_container_padding_px}px;padding:{sortable_body_padding_px}px;'
+                        'border-radius:3px;overflow:hidden;background:var(--secondary-background-color);">'
+                        f"{number_rows}</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+            with del_col:
+                st.markdown(
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Delete</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div style="height:{sortable_container_padding_px + sortable_body_padding_px + 5}px;"></div>',
+                    unsafe_allow_html=True,
+                )
+                for item in display_items:
+                    delete_btn_key = f"delete_track_{current_key_safe}_{item['id']}"
+                    if st.button(
+                        "x",
+                        key=delete_btn_key,
+                        use_container_width=True,
+                    ):
+                        deleted_track_id = item["id"]
+
+            with rename_col:
+                st.markdown(
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Rename</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div style="height:{sortable_container_padding_px + sortable_body_padding_px + 6}px;"></div>',
+                    unsafe_allow_html=True,
+                )
+                for item in display_items:
+                    rename_btn_key = f"rename_open_{current_key_safe}_{item['id']}"
+                    if st.button(
+                        "✎",
+                        key=rename_btn_key,
+                        use_container_width=True,
+                    ):
+                        st.session_state["rename_target"] = {
+                            "field_key": current_key,
+                            "track_id": item["id"],
+                        }
+
+            with map_col:
+                st.markdown(
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Map</div>',
+                    unsafe_allow_html=True,
+                )
+                if display_items:
+                    folium_map = create_map(polygon, display_items)
+                    st_folium(folium_map, width=600, height=map_height)
+
+            if deleted_track_id is not None:
+                current_state["line_items"] = [
+                    item for item in display_items if item["id"] != deleted_track_id
+                ]
+                current_state["dirty"] = True
+                line_items = current_state["line_items"]
+                clear_track_input_state(current_key)
+                st.success("Track deleted.")
             else:
-                st.info("No patterns available for this field.")
+                if [i["id"] for i in display_items] != [i["id"] for i in original_line_items]:
+                    current_state["line_items"] = display_items
+                    current_state["dirty"] = True
+                    line_items = current_state["line_items"]
+
+            rename_target = st.session_state.get("rename_target")
+            if (
+                rename_target
+                and rename_target.get("field_key") == current_key
+                and hasattr(st, "dialog")
+            ):
+                show_rename_dialog(current_key, int(rename_target["track_id"]))
 
         if st.button("Reset all changes"):
             reset_count = reset_all_field_states(
