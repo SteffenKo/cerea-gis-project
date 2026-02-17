@@ -37,6 +37,19 @@ def get_fields(farm_path: Path):
     return [d for d in farm_path.iterdir() if d.is_dir()]
 
 
+def get_exported_fields(farm_path: Path):
+    patterns_dir = farm_path / "patterns"
+    if not patterns_dir.exists():
+        return []
+
+    field_names = []
+    for patterns_file in patterns_dir.glob("*_patterns.shp"):
+        field_name = patterns_file.stem.removesuffix("_patterns")
+        field_names.append(field_name)
+
+    return sorted(field_names)
+
+
 def export_field(
     polygon,
     ordered_line_items,
@@ -50,9 +63,10 @@ def export_field(
     contours_dir.mkdir(parents=True, exist_ok=True)
     patterns_dir.mkdir(parents=True, exist_ok=True)
 
-    gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832")
-    gdf_poly = gdf_poly.to_crs(epsg=4326)
-    gdf_poly.to_file(contours_dir / f"{field_name}_contour.shp")
+    if polygon is not None:
+        gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832")
+        gdf_poly = gdf_poly.to_crs(epsg=4326)
+        gdf_poly.to_file(contours_dir / f"{field_name}_contour.shp")
 
     gdf_lines = gpd.GeoDataFrame(
         [
@@ -67,9 +81,11 @@ def export_field(
 
 
 def create_map(polygon, ordered_line_items):
-    gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832").to_crs(
-        epsg=4326
-    )
+    gdf_poly = None
+    if polygon is not None:
+        gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832").to_crs(
+            epsg=4326
+        )
     gdf_lines = gpd.GeoDataFrame(
         [
             {
@@ -83,18 +99,22 @@ def create_map(polygon, ordered_line_items):
         crs="EPSG:25832",
     ).to_crs(epsg=4326)
 
-    center = gdf_poly.geometry.centroid.iloc[0]
+    if gdf_poly is not None:
+        center = gdf_poly.geometry.centroid.iloc[0]
+    else:
+        center = gdf_lines.geometry.unary_union.centroid
     m = folium.Map(location=[center.y, center.x], zoom_start=16)
 
-    folium.GeoJson(
-        gdf_poly,
-        name="Field",
-        style_function=lambda _: {
-            "color": "green",
-            "weight": 2,
-            "fillOpacity": 0.2,
-        },
-    ).add_to(m)
+    if gdf_poly is not None:
+        folium.GeoJson(
+            gdf_poly,
+            name="Field",
+            style_function=lambda _: {
+                "color": "green",
+                "weight": 2,
+                "fillOpacity": 0.2,
+            },
+        ).add_to(m)
 
     for _, row in gdf_lines.iterrows():
         folium.GeoJson(
@@ -148,12 +168,49 @@ def load_field_data(contour_file, patterns_file, center_x, center_y):
     return polygon, line_items
 
 
-def field_key(farm_name: str, field_name: str):
-    return f"{farm_name}::{field_name}"
+@st.cache_data
+def load_field_data_from_shapefiles(contour_shp, patterns_shp):
+    if not patterns_shp.exists():
+        raise ValueError(f"Patterns shapefile not found: {patterns_shp}")
+
+    polygon = None
+    if contour_shp.exists():
+        gdf_contour = gpd.read_file(contour_shp)
+        if not gdf_contour.empty:
+            if gdf_contour.crs is None:
+                gdf_contour = gdf_contour.set_crs(epsg=4326)
+            gdf_contour = gdf_contour.to_crs(epsg=25832)
+            polygon = gdf_contour.geometry.unary_union
+
+    line_items = []
+    gdf_lines = gpd.read_file(patterns_shp)
+    if not gdf_lines.empty:
+        if gdf_lines.crs is None:
+            gdf_lines = gdf_lines.set_crs(epsg=4326)
+        gdf_lines = gdf_lines.to_crs(epsg=25832)
+
+        has_name_col = "name" in gdf_lines.columns
+        for idx, row in gdf_lines.reset_index(drop=True).iterrows():
+            name = f"Track {idx + 1}"
+            if has_name_col and row["name"] is not None and str(row["name"]).strip():
+                name = str(row["name"])
+            line_items.append({"id": idx, "name": name, "geometry": row.geometry})
+
+    return polygon, line_items
+
+
+def field_key(import_mode: str, farm_name: str, field_name: str):
+    return f"{import_mode}::{farm_name}::{field_name}"
 
 
 def parse_field_key(key: str):
-    return key.split("::", 1)
+    parts = key.split("::", 2)
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        # Backward compatibility for keys created before import modes existed.
+        return "Cerea txt", parts[0], parts[1]
+    raise ValueError(f"Invalid field key format: {key}")
 
 
 def get_track_input_versions():
@@ -190,14 +247,21 @@ def clear_all_track_input_state():
         versions[key] = versions.get(key, 0) + 1
 
 
-def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
+def ensure_field_state(
+    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
+):
     if "field_edits" not in st.session_state:
         st.session_state.field_edits = {}
 
     if key not in st.session_state.field_edits:
-        polygon, line_items = load_field_data(
-            contour_file, patterns_file, center_x, center_y
-        )
+        if import_mode == "Cerea txt":
+            polygon, line_items = load_field_data(
+                contour_source, patterns_source, center_x, center_y
+            )
+        else:
+            polygon, line_items = load_field_data_from_shapefiles(
+                contour_source, patterns_source
+            )
         st.session_state.field_edits[key] = {
             "polygon": polygon,
             "line_items": line_items,
@@ -207,8 +271,29 @@ def ensure_field_state(key, contour_file, patterns_file, center_x, center_y):
     return st.session_state.field_edits[key]
 
 
-def reset_field_state(key, contour_file, patterns_file, center_x, center_y):
-    polygon, line_items = load_field_data(contour_file, patterns_file, center_x, center_y)
+def get_field_sources(import_mode, root_path, farm_name, field_name):
+    if import_mode == "Cerea txt":
+        field_path = root_path / farm_name / field_name
+        contour_source = field_path / "contour.txt"
+        patterns_source = field_path / "patterns.txt"
+    else:
+        farm_path = root_path / farm_name
+        contour_source = farm_path / "contours" / f"{field_name}_contour.shp"
+        patterns_source = farm_path / "patterns" / f"{field_name}_patterns.shp"
+    return contour_source, patterns_source
+
+
+def reset_field_state(
+    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
+):
+    if import_mode == "Cerea txt":
+        polygon, line_items = load_field_data(
+            contour_source, patterns_source, center_x, center_y
+        )
+    else:
+        polygon, line_items = load_field_data_from_shapefiles(
+            contour_source, patterns_source
+        )
     st.session_state.field_edits[key] = {
         "polygon": polygon,
         "line_items": line_items,
@@ -216,51 +301,68 @@ def reset_field_state(key, contour_file, patterns_file, center_x, center_y):
     }
 
 
-def reset_all_field_states(cerea_root, center_x, center_y):
+def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None):
     if "field_edits" not in st.session_state:
         st.session_state.field_edits = {}
         return 0
 
     reset_count = 0
     for key in list(st.session_state.field_edits.keys()):
-        farm_name, field_name = parse_field_key(key)
-        field_path = cerea_root / farm_name / field_name
-        contour_file = field_path / "contour.txt"
-        patterns_file = field_path / "patterns.txt"
+        key_mode, farm_name, field_name = parse_field_key(key)
+        if key_mode != import_mode:
+            continue
 
-        if contour_file.exists():
-            reset_field_state(key, contour_file, patterns_file, center_x, center_y)
+        contour_source, patterns_source = get_field_sources(
+            import_mode, root_path, farm_name, field_name
+        )
+        source_exists = contour_source.exists() if import_mode == "Cerea txt" else patterns_source.exists()
+        if source_exists:
+            reset_field_state(
+                key, import_mode, contour_source, patterns_source, center_x, center_y
+            )
             reset_count += 1
 
     return reset_count
 
 
-def export_all_fields(cerea_root, output_root, center_x, center_y):
+def export_all_fields(import_mode, root_path, output_root, center_x=None, center_y=None):
     exported_count = 0
-    for farm_dir in get_farms(cerea_root):
-        for field_dir in get_fields(farm_dir):
-            contour_file = field_dir / "contour.txt"
-            if not contour_file.exists():
+    for farm_dir in get_farms(root_path):
+        if import_mode == "Cerea txt":
+            field_names = [field_dir.name for field_dir in get_fields(farm_dir)]
+        else:
+            field_names = get_exported_fields(farm_dir)
+
+        for field_name in field_names:
+            contour_source, patterns_source = get_field_sources(
+                import_mode, root_path, farm_dir.name, field_name
+            )
+            required_source = contour_source if import_mode == "Cerea txt" else patterns_source
+            if not required_source.exists():
                 continue
 
-            patterns_file = field_dir / "patterns.txt"
-            key = field_key(farm_dir.name, field_dir.name)
+            key = field_key(import_mode, farm_dir.name, field_name)
 
             if "field_edits" in st.session_state and key in st.session_state.field_edits:
                 state = st.session_state.field_edits[key]
                 polygon = state["polygon"]
                 line_items = state["line_items"]
             else:
-                polygon, line_items = load_field_data(
-                    contour_file, patterns_file, center_x, center_y
-                )
+                if import_mode == "Cerea txt":
+                    polygon, line_items = load_field_data(
+                        contour_source, patterns_source, center_x, center_y
+                    )
+                else:
+                    polygon, line_items = load_field_data_from_shapefiles(
+                        contour_source, patterns_source
+                    )
 
             export_field(
                 polygon,
                 line_items,
                 output_root,
                 farm_dir.name,
-                field_dir.name,
+                field_name,
             )
 
             if "field_edits" in st.session_state and key in st.session_state.field_edits:
@@ -271,12 +373,15 @@ def export_all_fields(cerea_root, output_root, center_x, center_y):
     return exported_count
 
 
-col_a, col_b = st.columns(2)
+mode_col, input_col, output_col = st.columns(3)
 
-with col_a:
-    cerea_root_input = st.text_input("Path to Cerea root folder", value="")
+with mode_col:
+    import_mode = st.selectbox("Import mode", ["Cerea txt", "Exported shp"])
 
-with col_b:
+with input_col:
+    cerea_root_input = st.text_input("Path to input root folder", value="")
+
+with output_col:
     output_root_input = st.text_input("Path to output folder", value="")
 
 if cerea_root_input and output_root_input:
@@ -287,12 +392,14 @@ if cerea_root_input and output_root_input:
         st.error("Cerea root does not exist.")
         st.stop()
 
-    universe_path = cerea_root / "universe.txt"
-    if not universe_path.exists():
-        st.error("universe.txt not found.")
-        st.stop()
-
-    center_x, center_y = read_center(universe_path)
+    center_x = None
+    center_y = None
+    if import_mode == "Cerea txt":
+        universe_path = cerea_root / "universe.txt"
+        if not universe_path.exists():
+            st.error("universe.txt not found.")
+            st.stop()
+        center_x, center_y = read_center(universe_path)
 
     farms = get_farms(cerea_root)
     farm_names = [f.name for f in farms]
@@ -303,20 +410,24 @@ if cerea_root_input and output_root_input:
     selected_farm = st.selectbox("Select farm", farm_names)
     farm_path = cerea_root / selected_farm
 
-    fields = get_fields(farm_path)
-    field_names = [f.name for f in fields]
+    if import_mode == "Cerea txt":
+        fields = get_fields(farm_path)
+        field_names = [f.name for f in fields]
+    else:
+        field_names = get_exported_fields(farm_path)
     if not field_names:
         st.warning("No fields found in selected farm.")
         st.stop()
 
     if "selected_field_by_farm" not in st.session_state:
         st.session_state.selected_field_by_farm = {}
+    farm_session_key = f"{import_mode}::{selected_farm}"
 
     if (
-        selected_farm not in st.session_state.selected_field_by_farm
-        or st.session_state.selected_field_by_farm[selected_farm] not in field_names
+        farm_session_key not in st.session_state.selected_field_by_farm
+        or st.session_state.selected_field_by_farm[farm_session_key] not in field_names
     ):
-        st.session_state.selected_field_by_farm[selected_farm] = field_names[0]
+        st.session_state.selected_field_by_farm[farm_session_key] = field_names[0]
 
     field_panel_col, editor_col = st.columns([1, 3])
 
@@ -324,9 +435,9 @@ if cerea_root_input and output_root_input:
         st.subheader("Fields")
         st.caption("Yellow dot = edited field")
 
-        selected_field = st.session_state.selected_field_by_farm[selected_farm]
+        selected_field = st.session_state.selected_field_by_farm[farm_session_key]
         for field_name in field_names:
-            key = field_key(selected_farm, field_name)
+            key = field_key(import_mode, selected_farm, field_name)
             is_dirty = (
                 "field_edits" in st.session_state
                 and key in st.session_state.field_edits
@@ -346,22 +457,30 @@ if cerea_root_input and output_root_input:
                     use_container_width=True,
                     type="primary" if field_name == selected_field else "secondary",
                 ):
-                    st.session_state.selected_field_by_farm[selected_farm] = field_name
+                    st.session_state.selected_field_by_farm[farm_session_key] = field_name
                     selected_field = field_name
 
     with editor_col:
-        field_path = farm_path / selected_field
+        contour_file, patterns_file = get_field_sources(
+            import_mode, cerea_root, selected_farm, selected_field
+        )
 
-        contour_file = field_path / "contour.txt"
-        patterns_file = field_path / "patterns.txt"
-
-        if not contour_file.exists():
-            st.warning("contour.txt not found.")
+        source_ok = contour_file.exists() if import_mode == "Cerea txt" else patterns_file.exists()
+        if not source_ok:
+            missing_msg = "contour.txt not found."
+            if import_mode == "Exported shp":
+                missing_msg = f"Patterns shapefile not found: {patterns_file.name}"
+            st.warning(missing_msg)
             st.stop()
 
-        current_key = field_key(selected_farm, selected_field)
+        current_key = field_key(import_mode, selected_farm, selected_field)
         current_state = ensure_field_state(
-            current_key, contour_file, patterns_file, center_x, center_y
+            current_key,
+            import_mode,
+            contour_file,
+            patterns_file,
+            center_x,
+            center_y,
         )
         polygon = current_state["polygon"]
         line_items = current_state["line_items"]
@@ -474,7 +593,9 @@ if cerea_root_input and output_root_input:
                 st.info("No patterns available for this field.")
 
         if st.button("Reset all changes"):
-            reset_count = reset_all_field_states(cerea_root, center_x, center_y)
+            reset_count = reset_all_field_states(
+                import_mode, cerea_root, center_x, center_y
+            )
             clear_all_track_input_state()
             if reset_count:
                 st.success(f"Reset all changes in {reset_count} field(s).")
@@ -483,7 +604,14 @@ if cerea_root_input and output_root_input:
             st.rerun()
 
         if st.button("Reset field changes"):
-            reset_field_state(current_key, contour_file, patterns_file, center_x, center_y)
+            reset_field_state(
+                current_key,
+                import_mode,
+                contour_file,
+                patterns_file,
+                center_x,
+                center_y,
+            )
             clear_track_input_state(current_key)
             st.success("Field changes reset to imported data.")
             st.rerun()
@@ -505,7 +633,7 @@ if cerea_root_input and output_root_input:
         with export_col_2:
             if st.button("Export all fields", use_container_width=True):
                 exported_count = export_all_fields(
-                    cerea_root, output_root, center_x, center_y
+                    import_mode, cerea_root, output_root, center_x, center_y
                 )
                 st.success(f"Exported {exported_count} field(s).")
 
@@ -519,8 +647,11 @@ if cerea_root_input and output_root_input:
                 if not changed_keys:
                     st.info("No changed fields to export.")
                 else:
+                    exported_changes = 0
                     for key in changed_keys:
-                        farm_name, field_name = parse_field_key(key)
+                        key_mode, farm_name, field_name = parse_field_key(key)
+                        if key_mode != import_mode:
+                            continue
                         state = st.session_state.field_edits[key]
                         export_field(
                             state["polygon"],
@@ -530,5 +661,9 @@ if cerea_root_input and output_root_input:
                             field_name,
                         )
                         state["dirty"] = False
+                        exported_changes += 1
 
-                    st.success(f"Exported {len(changed_keys)} changed field(s).")
+                    if exported_changes:
+                        st.success(f"Exported {exported_changes} changed field(s).")
+                    else:
+                        st.info("No changed fields for current import mode.")
