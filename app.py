@@ -1,6 +1,11 @@
 import folium
 import geopandas as gpd
 import streamlit as st
+import hashlib
+import io
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from streamlit_folium import st_folium
 from streamlit_sortables import sort_items
@@ -48,6 +53,116 @@ def get_exported_fields(farm_path: Path):
         field_names.append(field_name)
 
     return sorted(field_names)
+
+
+def prepare_uploaded_root(uploaded_zip):
+    zip_bytes = uploaded_zip.getvalue()
+    zip_hash = hashlib.sha256(zip_bytes).hexdigest()
+    zip_sig = f"{uploaded_zip.name}:{uploaded_zip.size}:{zip_hash}"
+
+    previous_sig = st.session_state.get("input_zip_sig")
+    if previous_sig != zip_sig:
+        previous_dir = st.session_state.get("input_extract_dir")
+        if previous_dir:
+            shutil.rmtree(previous_dir, ignore_errors=True)
+
+        extract_dir = Path(tempfile.mkdtemp(prefix="cerea_input_"))
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            zf.extractall(extract_dir)
+
+        st.session_state.input_zip_sig = zip_sig
+        st.session_state.input_extract_dir = str(extract_dir)
+        st.session_state.field_edits = {}
+        st.session_state.selected_field_by_farm = {}
+        if "export_bundle" in st.session_state:
+            del st.session_state["export_bundle"]
+        clear_all_track_input_state()
+
+    return Path(st.session_state.input_extract_dir)
+
+
+def resolve_import_root(extract_dir: Path, import_mode: str):
+    candidates = [extract_dir] + [d for d in extract_dir.iterdir() if d.is_dir()]
+
+    if import_mode == "Cerea txt":
+        for candidate in candidates:
+            if (candidate / "universe.txt").exists():
+                return candidate
+    else:
+        for candidate in candidates:
+            farm_dirs = [d for d in candidate.iterdir() if d.is_dir()]
+            for farm_dir in farm_dirs:
+                if (farm_dir / "patterns").exists():
+                    return candidate
+
+    return extract_dir
+
+
+def create_export_zip_bytes(export_root: Path):
+    mem_file = io.BytesIO()
+    with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for file_path in export_root.rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(export_root)
+                zf.write(file_path, arcname=str(rel_path))
+    mem_file.seek(0)
+    return mem_file.read()
+
+
+def validate_import_structure(import_mode: str, root_path: Path):
+    issues = []
+    warnings = []
+    stats = {"farms": 0, "fields": 0}
+
+    farms = get_farms(root_path)
+    stats["farms"] = len(farms)
+    if not farms:
+        issues.append("No farm folders found in import root.")
+        return {"issues": issues, "warnings": warnings, "stats": stats}
+
+    if import_mode == "Cerea txt":
+        if not (root_path / "universe.txt").exists():
+            issues.append("Missing required file: universe.txt")
+
+        for farm_dir in farms:
+            fields = get_fields(farm_dir)
+            if not fields:
+                warnings.append(f"No field folders in farm: {farm_dir.name}")
+                continue
+            for field_dir in fields:
+                stats["fields"] += 1
+                contour_file = field_dir / "contour.txt"
+                patterns_file = field_dir / "patterns.txt"
+                if not contour_file.exists():
+                    issues.append(f"Missing contour.txt: {farm_dir.name}/{field_dir.name}")
+                if not patterns_file.exists():
+                    warnings.append(
+                        f"Missing optional patterns.txt: {farm_dir.name}/{field_dir.name}"
+                    )
+    else:
+        for farm_dir in farms:
+            patterns_dir = farm_dir / "patterns"
+            contours_dir = farm_dir / "contours"
+            if not patterns_dir.exists():
+                issues.append(f"Missing required patterns folder: {farm_dir.name}/patterns")
+                continue
+
+            field_names = get_exported_fields(farm_dir)
+            if not field_names:
+                issues.append(
+                    f"No *_patterns.shp files found in: {farm_dir.name}/patterns"
+                )
+                continue
+
+            for field_name in field_names:
+                stats["fields"] += 1
+                contour_shp = contours_dir / f"{field_name}_contour.shp"
+                if not contour_shp.exists():
+                    warnings.append(
+                        f"Missing optional contour shapefile: {farm_dir.name}/contours/{field_name}_contour.shp"
+                    )
+
+    return {"issues": issues, "warnings": warnings, "stats": stats}
 
 
 def export_field(
@@ -373,23 +488,44 @@ def export_all_fields(import_mode, root_path, output_root, center_x=None, center
     return exported_count
 
 
-mode_col, input_col, output_col = st.columns(3)
+mode_col, input_col, check_col = st.columns([1, 2, 2])
 
 with mode_col:
     import_mode = st.selectbox("Import mode", ["Cerea txt", "Exported shp"])
 
 with input_col:
-    cerea_root_input = st.text_input("Path to input root folder", value="")
+    uploaded_input_zip = st.file_uploader(
+        "Import data zip",
+        type=["zip"],
+        accept_multiple_files=False,
+    )
 
-with output_col:
-    output_root_input = st.text_input("Path to output folder", value="")
+with check_col:
+    st.caption("Input structure check appears after upload.")
 
-if cerea_root_input and output_root_input:
-    cerea_root = Path(cerea_root_input)
-    output_root = Path(output_root_input)
+if uploaded_input_zip is not None:
+    extracted_root = prepare_uploaded_root(uploaded_input_zip)
+    cerea_root = resolve_import_root(extracted_root, import_mode)
 
-    if not cerea_root.exists():
-        st.error("Cerea root does not exist.")
+    validation = validate_import_structure(import_mode, cerea_root)
+    stats = validation["stats"]
+    with check_col:
+        with st.expander("Input structure check", expanded=False):
+            st.write(f"Root: `{cerea_root}`")
+            st.write(f"Farms found: `{stats['farms']}`")
+            st.write(f"Fields found: `{stats['fields']}`")
+            if validation["issues"]:
+                st.error("Blocking issues found:")
+                for issue in validation["issues"]:
+                    st.write(f"- {issue}")
+            else:
+                st.success("Required structure looks valid.")
+            if validation["warnings"]:
+                st.warning("Optional items missing:")
+                for warn in validation["warnings"]:
+                    st.write(f"- {warn}")
+
+    if validation["issues"]:
         st.stop()
 
     center_x = None
@@ -407,8 +543,12 @@ if cerea_root_input and output_root_input:
         st.warning("No farms found in Cerea root.")
         st.stop()
 
-    selected_farm = st.selectbox("Select farm", farm_names)
-    farm_path = cerea_root / selected_farm
+    field_panel_col, editor_col = st.columns([1, 3])
+
+    with field_panel_col:
+        selected_farm = st.selectbox("Select farm", farm_names)
+        farm_path = cerea_root / selected_farm
+        st.divider()
 
     if import_mode == "Cerea txt":
         fields = get_fields(farm_path)
@@ -428,8 +568,6 @@ if cerea_root_input and output_root_input:
         or st.session_state.selected_field_by_farm[farm_session_key] not in field_names
     ):
         st.session_state.selected_field_by_farm[farm_session_key] = field_names[0]
-
-    field_panel_col, editor_col = st.columns([1, 3])
 
     with field_panel_col:
         st.subheader("Fields")
@@ -619,26 +757,40 @@ if cerea_root_input and output_root_input:
         export_col_1, export_col_2, export_col_3 = st.columns(3)
 
         with export_col_1:
-            if st.button("Export current field", use_container_width=True):
+            if st.button("Prepare current field export", use_container_width=True):
+                export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
                 export_field(
                     polygon,
                     current_state["line_items"],
-                    output_root,
+                    export_root,
                     selected_farm,
                     selected_field,
                 )
+                zip_bytes = create_export_zip_bytes(export_root)
+                shutil.rmtree(export_root, ignore_errors=True)
+                st.session_state.export_bundle = {
+                    "bytes": zip_bytes,
+                    "label": "current field",
+                }
                 current_state["dirty"] = False
-                st.success("Current field exported.")
+                st.success("Current field export prepared.")
 
         with export_col_2:
-            if st.button("Export all fields", use_container_width=True):
+            if st.button("Prepare all fields export", use_container_width=True):
+                export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
                 exported_count = export_all_fields(
-                    import_mode, cerea_root, output_root, center_x, center_y
+                    import_mode, cerea_root, export_root, center_x, center_y
                 )
-                st.success(f"Exported {exported_count} field(s).")
+                zip_bytes = create_export_zip_bytes(export_root)
+                shutil.rmtree(export_root, ignore_errors=True)
+                st.session_state.export_bundle = {
+                    "bytes": zip_bytes,
+                    "label": "all fields",
+                }
+                st.success(f"Prepared export for {exported_count} field(s).")
 
         with export_col_3:
-            if st.button("Export all changes", use_container_width=True):
+            if st.button("Prepare all changes export", use_container_width=True):
                 changed_keys = [
                     key
                     for key, state in st.session_state.field_edits.items()
@@ -647,6 +799,7 @@ if cerea_root_input and output_root_input:
                 if not changed_keys:
                     st.info("No changed fields to export.")
                 else:
+                    export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
                     exported_changes = 0
                     for key in changed_keys:
                         key_mode, farm_name, field_name = parse_field_key(key)
@@ -656,7 +809,7 @@ if cerea_root_input and output_root_input:
                         export_field(
                             state["polygon"],
                             state["line_items"],
-                            output_root,
+                            export_root,
                             farm_name,
                             field_name,
                         )
@@ -664,6 +817,41 @@ if cerea_root_input and output_root_input:
                         exported_changes += 1
 
                     if exported_changes:
-                        st.success(f"Exported {exported_changes} changed field(s).")
+                        zip_bytes = create_export_zip_bytes(export_root)
+                        shutil.rmtree(export_root, ignore_errors=True)
+                        st.session_state.export_bundle = {
+                            "bytes": zip_bytes,
+                            "label": "all changes",
+                        }
+                        st.success(f"Prepared export for {exported_changes} changed field(s).")
                     else:
+                        shutil.rmtree(export_root, ignore_errors=True)
                         st.info("No changed fields for current import mode.")
+
+        bundle = st.session_state.get("export_bundle")
+        if bundle:
+            st.caption(
+                "Edit the export zip name below. Press Enter to apply the name for download/export."
+            )
+            download_col, name_col = st.columns([2, 1])
+            with download_col:
+                export_zip_name = st.text_input(
+                    "Export zip name",
+                    value=st.session_state.get("export_zip_name", "cerea_export.zip"),
+                    key="export_zip_name",
+                    label_visibility="collapsed",
+                    placeholder="Export zip name",
+                )
+            with name_col:
+                download_name = export_zip_name or "cerea_export.zip"
+                if not download_name.lower().endswith(".zip"):
+                    download_name = f"{download_name}.zip"
+                st.download_button(
+                    label=f"Download {bundle['label']} zip",
+                    data=bundle["bytes"],
+                    file_name=download_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+else:
+    st.info("Upload a zip file to start.")
