@@ -727,7 +727,7 @@ if uploaded_input_zip is not None:
 
             num_col, del_col, rename_col, dnd_col, map_col = st.columns(
                 [0.7, 0.7, 0.7, 3.5, 6.0],
-                gap="xxsmall",
+                gap="small",
             )
 
             with dnd_col:
