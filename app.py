@@ -724,10 +724,40 @@ if uploaded_input_zip is not None:
             original_line_items = list(line_items)
             ordered_line_items = list(line_items)
             current_key_safe = safe_widget_suffix(current_key)
+            controls_row_key = f"track_controls_row_{current_key_safe}"
+            dnd_col_key = f"track_dnd_col_{current_key_safe}"
+            map_col_key = f"track_map_col_{current_key_safe}"
 
-            num_col, del_col, rename_col, dnd_col, map_col = st.columns(
-                [0.7, 0.7, 0.7, 3.5, 6.0],
-                gap="small",
+            controls_row = st.container(horizontal=True, gap=None, key=controls_row_key)
+            with controls_row:
+                num_col = st.container(width=40)
+                del_col = st.container(width=40)
+                rename_col = st.container(width=40)
+                dnd_col = st.container(width="stretch", key=dnd_col_key)
+                map_col = st.container(width="stretch", key=map_col_key)
+
+            st.markdown(
+                f"""
+                <style>
+                div.st-key-{controls_row_key} [data-testid="stHorizontalBlock"] {{
+                    width: 100% !important;
+                    flex-wrap: nowrap !important;
+                    align-items: flex-start !important;
+                }}
+                div.st-key-{controls_row_key} [data-testid="stHorizontalBlock"] > div:nth-last-child(2),
+                div.st-key-{controls_row_key} [data-testid="stHorizontalBlock"] > div:last-child {{
+                    flex: 1 1 0 !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                }}
+                div.st-key-{map_col_key} [data-testid="stCustomComponentV1"],
+                div.st-key-{map_col_key} iframe {{
+                    width: 100% !important;
+                    max-width: 100% !important;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True,
             )
 
             with dnd_col:
@@ -736,7 +766,23 @@ if uploaded_input_zip is not None:
                     unsafe_allow_html=True,
                 )
                 sortable_names = [item["name"] for item in line_items]
-                ordered_names = sort_items(sortable_names, direction="vertical")
+                ordered_names = sort_items(
+                    sortable_names,
+                    direction="vertical",
+                    custom_style="""
+                    .sortable-component.vertical {
+                        width: 100%;
+                    }
+                    .sortable-component.vertical .sortable-container {
+                        width: 100%;
+                        min-width: 0;
+                    }
+                    .sortable-component.vertical .sortable-container-body {
+                        width: 100%;
+                        box-sizing: border-box;
+                    }
+                    """,
+                )
 
                 name_buckets = {}
                 for item in line_items:
@@ -752,6 +798,7 @@ if uploaded_input_zip is not None:
                     ordered_line_items = resolved_items
 
             display_items = ordered_line_items
+            folium_map = create_map(polygon, display_items) if display_items else None
 
             style_rules = []
             for item in display_items:
@@ -843,7 +890,7 @@ if uploaded_input_zip is not None:
 
             with rename_col:
                 st.markdown(
-                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Rename</div>',
+                    '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Edit</div>',
                     unsafe_allow_html=True,
                 )
                 st.markdown(
@@ -867,9 +914,13 @@ if uploaded_input_zip is not None:
                     '<div style="font-size:0.78rem;font-weight:600;white-space:nowrap;">Map</div>',
                     unsafe_allow_html=True,
                 )
-                if display_items:
-                    folium_map = create_map(polygon, display_items)
-                    st_folium(folium_map, width=600, height=map_height)
+                if folium_map is not None:
+                    st_folium(
+                        folium_map,
+                        key=f"track_map_{current_key_safe}",
+                        height=map_height,
+                        use_container_width=True,
+                    )
 
             if deleted_track_id is not None:
                 current_state["line_items"] = [
