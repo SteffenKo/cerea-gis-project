@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+cereagisenv/
+.venv/
+venv/
+env/
+
+# Local runtime/output
+output/
+*.zip
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# OS/editor
+.DS_Store
+Thumbs.db
+
+# Optional local sample/input data
+data/raw/

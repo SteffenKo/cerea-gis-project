@@ -2,5 +2,7 @@ geopandas
 shapely
 pyproj
 fiona
+folium
 streamlit
 streamlit-sortables
+streamlit-folium

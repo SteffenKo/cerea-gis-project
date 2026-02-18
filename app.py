@@ -1,17 +1,35 @@
-import folium
-import geopandas as gpd
-import streamlit as st
 import hashlib
 import io
 import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+
+import streamlit as st
 from streamlit_folium import st_folium
 from streamlit_sortables import sort_items
 
-from src.cerea_gis.contour import parse_contour
-from src.cerea_gis.patterns import parse_patterns
+from src.cerea_gis.io_helpers import (
+    create_export_zip_bytes,
+    export_field,
+    get_exported_fields,
+    get_farms,
+    get_fields,
+    get_field_sources,
+    resolve_import_root,
+    validate_import_structure,
+)
+from src.cerea_gis.state_helpers import (
+    clear_all_track_input_state,
+    clear_track_input_state,
+    ensure_field_state,
+    export_all_fields,
+    field_key,
+    parse_field_key,
+    reset_all_field_states,
+    reset_field_state,
+)
+from src.cerea_gis.ui_helpers import create_map, safe_widget_suffix
 from src.cerea_gis.universe import read_center
 
 st.set_page_config(layout="wide")
@@ -32,27 +50,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def get_farms(cerea_root: Path):
-    return [d for d in cerea_root.iterdir() if d.is_dir()]
-
-
-def get_fields(farm_path: Path):
-    return [d for d in farm_path.iterdir() if d.is_dir()]
-
-
-def get_exported_fields(farm_path: Path):
-    patterns_dir = farm_path / "patterns"
-    if not patterns_dir.exists():
-        return []
-
-    field_names = []
-    for patterns_file in patterns_dir.glob("*_patterns.shp"):
-        field_name = patterns_file.stem.removesuffix("_patterns")
-        field_names.append(field_name)
-
-    return sorted(field_names)
 
 
 def prepare_uploaded_root(uploaded_zip):
@@ -81,94 +78,6 @@ def prepare_uploaded_root(uploaded_zip):
         clear_all_track_input_state()
 
     return Path(st.session_state.input_extract_dir)
-
-
-def resolve_import_root(extract_dir: Path, import_mode: str):
-    candidates = [extract_dir] + [d for d in extract_dir.iterdir() if d.is_dir()]
-
-    if import_mode == "Cerea txt":
-        for candidate in candidates:
-            if (candidate / "universe.txt").exists():
-                return candidate
-    else:
-        for candidate in candidates:
-            farm_dirs = [d for d in candidate.iterdir() if d.is_dir()]
-            for farm_dir in farm_dirs:
-                if (farm_dir / "patterns").exists():
-                    return candidate
-
-    return extract_dir
-
-
-def create_export_zip_bytes(export_root: Path):
-    mem_file = io.BytesIO()
-    with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in export_root.rglob("*"):
-            if file_path.is_file():
-                rel_path = file_path.relative_to(export_root)
-                zf.write(file_path, arcname=str(rel_path))
-    mem_file.seek(0)
-    return mem_file.read()
-
-
-def validate_import_structure(import_mode: str, root_path: Path):
-    issues = []
-    warnings = []
-    stats = {"farms": 0, "fields": 0}
-
-    farms = get_farms(root_path)
-    stats["farms"] = len(farms)
-    if not farms:
-        issues.append("No farm folders found in import root.")
-        return {"issues": issues, "warnings": warnings, "stats": stats}
-
-    if import_mode == "Cerea txt":
-        if not (root_path / "universe.txt").exists():
-            issues.append("Missing required file: universe.txt")
-
-        for farm_dir in farms:
-            fields = get_fields(farm_dir)
-            if not fields:
-                warnings.append(f"No field folders in farm: {farm_dir.name}")
-                continue
-            for field_dir in fields:
-                stats["fields"] += 1
-                contour_file = field_dir / "contour.txt"
-                patterns_file = field_dir / "patterns.txt"
-                if not contour_file.exists():
-                    issues.append(f"Missing contour.txt: {farm_dir.name}/{field_dir.name}")
-                if not patterns_file.exists():
-                    warnings.append(
-                        f"Missing optional patterns.txt: {farm_dir.name}/{field_dir.name}"
-                    )
-    else:
-        for farm_dir in farms:
-            patterns_dir = farm_dir / "patterns"
-            contours_dir = farm_dir / "contours"
-            if not patterns_dir.exists():
-                issues.append(f"Missing required patterns folder: {farm_dir.name}/patterns")
-                continue
-
-            field_names = get_exported_fields(farm_dir)
-            if not field_names:
-                issues.append(
-                    f"No *_patterns.shp files found in: {farm_dir.name}/patterns"
-                )
-                continue
-
-            for field_name in field_names:
-                stats["fields"] += 1
-                contour_shp = contours_dir / f"{field_name}_contour.shp"
-                if not contour_shp.exists():
-                    warnings.append(
-                        f"Missing optional contour shapefile: {farm_dir.name}/contours/{field_name}_contour.shp"
-                    )
-
-    return {"issues": issues, "warnings": warnings, "stats": stats}
-
-
-def safe_widget_suffix(value: str):
-    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
 
 
 if hasattr(st, "dialog"):
@@ -267,329 +176,6 @@ if hasattr(st, "dialog"):
             if st.button("Cancel", use_container_width=True):
                 st.session_state.pop("reset_all_target", None)
                 st.rerun()
-
-
-def export_field(
-    polygon,
-    ordered_line_items,
-    output_dir: Path,
-    farm_name: str,
-    field_name: str,
-):
-    farm_dir = output_dir / farm_name
-    contours_dir = farm_dir / "contours"
-    patterns_dir = farm_dir / "patterns"
-    contours_dir.mkdir(parents=True, exist_ok=True)
-    patterns_dir.mkdir(parents=True, exist_ok=True)
-
-    if polygon is not None:
-        gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832")
-        gdf_poly = gdf_poly.to_crs(epsg=4326)
-        gdf_poly.to_file(contours_dir / f"{field_name}_contour.shp")
-
-    gdf_lines = gpd.GeoDataFrame(
-        [
-            {"id": item["id"], "name": item["name"], "geometry": item["geometry"]}
-            for item in ordered_line_items
-        ],
-        crs="EPSG:25832",
-    )
-    gdf_lines = gdf_lines.to_crs(epsg=4326)
-    gdf_lines.reset_index(drop=True, inplace=True)
-    gdf_lines.to_file(patterns_dir / f"{field_name}_patterns.shp")
-
-
-def create_map(polygon, ordered_line_items):
-    gdf_poly = None
-    if polygon is not None:
-        gdf_poly = gpd.GeoDataFrame([{"geometry": polygon}], crs="EPSG:25832").to_crs(
-            epsg=4326
-        )
-    gdf_lines = gpd.GeoDataFrame(
-        [
-            {
-                "order": i + 1,
-                "id": item["id"],
-                "name": item["name"],
-                "geometry": item["geometry"],
-            }
-            for i, item in enumerate(ordered_line_items)
-        ],
-        crs="EPSG:25832",
-    ).to_crs(epsg=4326)
-
-    if gdf_poly is not None:
-        center = gdf_poly.geometry.centroid.iloc[0]
-    else:
-        center = gdf_lines.geometry.unary_union.centroid
-    m = folium.Map(location=[center.y, center.x], zoom_start=16)
-
-    if gdf_poly is not None:
-        folium.GeoJson(
-            gdf_poly,
-            name="Field",
-            style_function=lambda _: {
-                "color": "green",
-                "weight": 2,
-                "fillOpacity": 0.2,
-            },
-        ).add_to(m)
-
-    for _, row in gdf_lines.iterrows():
-        folium.GeoJson(
-            row["geometry"],
-            tooltip=f"{row['order']} - {row['name']}",
-            style_function=lambda _: {
-                "color": "blue",
-                "weight": 3,
-            },
-        ).add_to(m)
-
-        midpoint = row["geometry"].interpolate(0.5, normalized=True)
-        folium.Marker(
-            location=[midpoint.y, midpoint.x],
-            icon=folium.DivIcon(
-                html=f"""
-                <div style="
-                    font-size: 14px;
-                    font-weight: bold;
-                    color: black;
-                    background-color: white;
-                    border: 2px solid black;
-                    border-radius: 12px;
-                    text-align: center;
-                    width: 24px;
-                    height: 24px;
-                    line-height: 20px;
-                ">
-                    {row['order']}
-                </div>
-                """
-            ),
-        ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-    return m
-
-
-@st.cache_data
-def load_field_data(contour_file, patterns_file, center_x, center_y):
-    polygon = parse_contour(contour_file, center_x, center_y)
-
-    line_items = []
-    if patterns_file.exists():
-        raw_lines = parse_patterns(patterns_file, center_x, center_y)
-        line_items = [
-            {"id": idx, "name": name, "geometry": geom}
-            for idx, (name, geom) in enumerate(raw_lines)
-        ]
-
-    return polygon, line_items
-
-
-@st.cache_data
-def load_field_data_from_shapefiles(contour_shp, patterns_shp):
-    if not patterns_shp.exists():
-        raise ValueError(f"Patterns shapefile not found: {patterns_shp}")
-
-    polygon = None
-    if contour_shp.exists():
-        gdf_contour = gpd.read_file(contour_shp)
-        if not gdf_contour.empty:
-            if gdf_contour.crs is None:
-                gdf_contour = gdf_contour.set_crs(epsg=4326)
-            gdf_contour = gdf_contour.to_crs(epsg=25832)
-            polygon = gdf_contour.geometry.unary_union
-
-    line_items = []
-    gdf_lines = gpd.read_file(patterns_shp)
-    if not gdf_lines.empty:
-        if gdf_lines.crs is None:
-            gdf_lines = gdf_lines.set_crs(epsg=4326)
-        gdf_lines = gdf_lines.to_crs(epsg=25832)
-
-        has_name_col = "name" in gdf_lines.columns
-        for idx, row in gdf_lines.reset_index(drop=True).iterrows():
-            name = f"Track {idx + 1}"
-            if has_name_col and row["name"] is not None and str(row["name"]).strip():
-                name = str(row["name"])
-            line_items.append({"id": idx, "name": name, "geometry": row.geometry})
-
-    return polygon, line_items
-
-
-def field_key(import_mode: str, farm_name: str, field_name: str):
-    return f"{import_mode}::{farm_name}::{field_name}"
-
-
-def parse_field_key(key: str):
-    parts = key.split("::", 2)
-    if len(parts) == 3:
-        return parts[0], parts[1], parts[2]
-    if len(parts) == 2:
-        # Backward compatibility for keys created before import modes existed.
-        return "Cerea txt", parts[0], parts[1]
-    raise ValueError(f"Invalid field key format: {key}")
-
-
-def get_track_input_versions():
-    if "track_input_versions" not in st.session_state:
-        st.session_state.track_input_versions = {}
-    return st.session_state.track_input_versions
-
-
-def get_track_input_version(key: str):
-    versions = get_track_input_versions()
-    return versions.get(key, 0)
-
-
-def bump_track_input_version(key: str):
-    versions = get_track_input_versions()
-    versions[key] = versions.get(key, 0) + 1
-
-
-def clear_track_input_state(key: str):
-    prefix = f"track_name_{key}_"
-    for session_key in list(st.session_state.keys()):
-        if session_key.startswith(prefix):
-            del st.session_state[session_key]
-    bump_track_input_version(key)
-
-
-def clear_all_track_input_state():
-    prefix = "track_name_"
-    for session_key in list(st.session_state.keys()):
-        if session_key.startswith(prefix):
-            del st.session_state[session_key]
-    versions = get_track_input_versions()
-    for key in list(versions.keys()):
-        versions[key] = versions.get(key, 0) + 1
-
-
-def ensure_field_state(
-    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
-):
-    if "field_edits" not in st.session_state:
-        st.session_state.field_edits = {}
-
-    if key not in st.session_state.field_edits:
-        if import_mode == "Cerea txt":
-            polygon, line_items = load_field_data(
-                contour_source, patterns_source, center_x, center_y
-            )
-        else:
-            polygon, line_items = load_field_data_from_shapefiles(
-                contour_source, patterns_source
-            )
-        st.session_state.field_edits[key] = {
-            "polygon": polygon,
-            "line_items": line_items,
-            "dirty": False,
-        }
-
-    return st.session_state.field_edits[key]
-
-
-def get_field_sources(import_mode, root_path, farm_name, field_name):
-    if import_mode == "Cerea txt":
-        field_path = root_path / farm_name / field_name
-        contour_source = field_path / "contour.txt"
-        patterns_source = field_path / "patterns.txt"
-    else:
-        farm_path = root_path / farm_name
-        contour_source = farm_path / "contours" / f"{field_name}_contour.shp"
-        patterns_source = farm_path / "patterns" / f"{field_name}_patterns.shp"
-    return contour_source, patterns_source
-
-
-def reset_field_state(
-    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
-):
-    if import_mode == "Cerea txt":
-        polygon, line_items = load_field_data(
-            contour_source, patterns_source, center_x, center_y
-        )
-    else:
-        polygon, line_items = load_field_data_from_shapefiles(
-            contour_source, patterns_source
-        )
-    st.session_state.field_edits[key] = {
-        "polygon": polygon,
-        "line_items": line_items,
-        "dirty": False,
-    }
-
-
-def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None):
-    if "field_edits" not in st.session_state:
-        st.session_state.field_edits = {}
-        return 0
-
-    reset_count = 0
-    for key in list(st.session_state.field_edits.keys()):
-        key_mode, farm_name, field_name = parse_field_key(key)
-        if key_mode != import_mode:
-            continue
-
-        contour_source, patterns_source = get_field_sources(
-            import_mode, root_path, farm_name, field_name
-        )
-        source_exists = contour_source.exists() if import_mode == "Cerea txt" else patterns_source.exists()
-        if source_exists:
-            reset_field_state(
-                key, import_mode, contour_source, patterns_source, center_x, center_y
-            )
-            reset_count += 1
-
-    return reset_count
-
-
-def export_all_fields(import_mode, root_path, output_root, center_x=None, center_y=None):
-    exported_count = 0
-    for farm_dir in get_farms(root_path):
-        if import_mode == "Cerea txt":
-            field_names = [field_dir.name for field_dir in get_fields(farm_dir)]
-        else:
-            field_names = get_exported_fields(farm_dir)
-
-        for field_name in field_names:
-            contour_source, patterns_source = get_field_sources(
-                import_mode, root_path, farm_dir.name, field_name
-            )
-            required_source = contour_source if import_mode == "Cerea txt" else patterns_source
-            if not required_source.exists():
-                continue
-
-            key = field_key(import_mode, farm_dir.name, field_name)
-
-            if "field_edits" in st.session_state and key in st.session_state.field_edits:
-                state = st.session_state.field_edits[key]
-                polygon = state["polygon"]
-                line_items = state["line_items"]
-            else:
-                if import_mode == "Cerea txt":
-                    polygon, line_items = load_field_data(
-                        contour_source, patterns_source, center_x, center_y
-                    )
-                else:
-                    polygon, line_items = load_field_data_from_shapefiles(
-                        contour_source, patterns_source
-                    )
-
-            export_field(
-                polygon,
-                line_items,
-                output_root,
-                farm_dir.name,
-                field_name,
-            )
-
-            if "field_edits" in st.session_state and key in st.session_state.field_edits:
-                st.session_state.field_edits[key]["dirty"] = False
-
-            exported_count += 1
-
-    return exported_count
 
 
 mode_col, input_col, check_col = st.columns([1, 2, 2])
