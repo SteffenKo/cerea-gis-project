@@ -33,7 +33,7 @@ from src.cerea_gis.ui_helpers import create_map, safe_widget_suffix
 from src.cerea_gis.universe import read_center
 
 st.set_page_config(layout="wide")
-st.title("Cerea GIS Converter")
+st.title("Cerea 300 GIS")
 st.markdown(
     """
     <style>
@@ -177,6 +177,16 @@ if hasattr(st, "dialog"):
                 st.session_state.pop("reset_all_target", None)
                 st.rerun()
 
+
+st.info(
+    """
+    **Welcome to Cerea 300 GIS! You can extract your Cerea 300 files, manipulate your patterns and export them in ShapeFile format.**
+
+    - Upload exactly one `.zip` file (not individual files).
+    - Use **Cerea txt** when the zip contains `universe.txt` and farm/field folders with `patterns.txt` (`contour.txt` optional).
+    - Use **Exported shp** when the zip contains farm folders with `patterns/*_patterns.shp` (The export format of this application).
+    """
+)
 
 mode_col, input_col, check_col = st.columns([1, 2, 2])
 
