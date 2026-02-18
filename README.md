@@ -15,6 +15,7 @@ streamlit run app.py
 2. In Streamlit Community Cloud, create a new app from the repo.
 3. Set the main file path to `app.py`.
 4. Keep dependencies in `requirements.txt`.
+5. Keep Python runtime in `runtime.txt`.
 
 ## Project structure
 
