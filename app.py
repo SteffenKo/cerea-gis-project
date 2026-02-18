@@ -625,7 +625,7 @@ if uploaded_input_zip is not None:
 
     with field_panel_col:
         st.subheader("Fields")
-        st.caption("Edited fields are highlighted in yellow.")
+        st.caption("Edited fields are highlighted in light green.")
 
         selected_field = st.session_state.selected_field_by_farm[farm_session_key]
         highlighted_button_keys = []
@@ -660,13 +660,13 @@ if uploaded_input_zip is not None:
                 style_rules.append(
                     f"""
                     div.st-key-{btn_key} button {{
-                        background-color: #f9a825 !important;
+                        background-color: #D6F2CE !important;
                         color: #1f1f1f !important;
-                        border-color: #f9a825 !important;
+                        border-color: #D6F2CE !important;
                     }}
                     div.st-key-{btn_key} button:hover {{
-                        background-color: #fbc34a !important;
-                        border-color: #fbc34a !important;
+                        background-color: #D6F2CE !important;
+                        border-color: #D6F2CE !important;
                     }}
                     """
                 )
