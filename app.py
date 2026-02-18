@@ -945,11 +945,6 @@ if uploaded_input_zip is not None:
                         max-width: {row_height_px}px !important;
                         margin: 0 !important;
                         padding: 0 !important;
-                        border: 1px solid #e8e8e8 !important;
-                        border-radius: 0 !important;
-                        background: #ffffff !important;
-                        color: #1f1f1f !important;
-                        box-shadow: none !important;
                     }}
                     div.st-key-{delete_btn_key} button {{
                         margin-left: auto !important;
