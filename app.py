@@ -74,6 +74,8 @@ def prepare_uploaded_root(uploaded_zip):
         st.session_state.input_extract_dir = str(extract_dir)
         st.session_state.field_edits = {}
         st.session_state.selected_field_by_farm = {}
+        st.session_state.pop("reset_field_target", None)
+        st.session_state.pop("reset_all_target", None)
         if "export_bundle" in st.session_state:
             del st.session_state["export_bundle"]
         clear_all_track_input_state()
@@ -213,6 +215,57 @@ if hasattr(st, "dialog"):
         with cancel_col:
             if st.button("Cancel", use_container_width=True):
                 st.session_state.pop("rename_target", None)
+                st.rerun()
+
+    @st.dialog("Confirm field reset")
+    def show_reset_field_dialog(
+        field_state_key: str,
+        import_mode: str,
+        contour_source: str,
+        patterns_source: str,
+        center_x,
+        center_y,
+    ):
+        st.warning("Do you really want to reset changes for this field?")
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Reset field", use_container_width=True):
+                reset_field_state(
+                    field_state_key,
+                    import_mode,
+                    Path(contour_source),
+                    Path(patterns_source),
+                    center_x,
+                    center_y,
+                )
+                clear_track_input_state(field_state_key)
+                st.session_state.pop("reset_field_target", None)
+                st.success("Field changes reset to imported data.")
+                st.rerun()
+        with cancel_col:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.pop("reset_field_target", None)
+                st.rerun()
+
+    @st.dialog("Confirm reset all")
+    def show_reset_all_dialog(import_mode: str, root_path: str, center_x, center_y):
+        st.warning("Do you really want to reset changes for all fields?")
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Reset all", use_container_width=True):
+                reset_count = reset_all_field_states(
+                    import_mode, Path(root_path), center_x, center_y
+                )
+                clear_all_track_input_state()
+                st.session_state.pop("reset_all_target", None)
+                if reset_count:
+                    st.success(f"Reset all changes in {reset_count} field(s).")
+                else:
+                    st.info("No field state to reset.")
+                st.rerun()
+        with cancel_col:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.pop("reset_all_target", None)
                 st.rerun()
 
 
@@ -675,11 +728,79 @@ if uploaded_input_zip is not None:
                 unsafe_allow_html=True,
             )
 
-    with editor_col:
-        contour_file, patterns_file = get_field_sources(
-            import_mode, cerea_root, selected_farm, selected_field
-        )
+    contour_file, patterns_file = get_field_sources(
+        import_mode, cerea_root, selected_farm, selected_field
+    )
+    current_key = field_key(import_mode, selected_farm, selected_field)
 
+    with field_panel_col:
+        st.divider()
+        if st.button("Reset field changes", use_container_width=True):
+            if hasattr(st, "dialog"):
+                st.session_state["reset_field_target"] = {
+                    "field_key": current_key,
+                    "import_mode": import_mode,
+                    "contour_source": str(contour_file),
+                    "patterns_source": str(patterns_file),
+                    "center_x": center_x,
+                    "center_y": center_y,
+                }
+                st.rerun()
+            else:
+                reset_field_state(
+                    current_key,
+                    import_mode,
+                    contour_file,
+                    patterns_file,
+                    center_x,
+                    center_y,
+                )
+                clear_track_input_state(current_key)
+                st.success("Field changes reset to imported data.")
+                st.rerun()
+
+        if st.button("Reset all changes", use_container_width=True):
+            if hasattr(st, "dialog"):
+                st.session_state["reset_all_target"] = {
+                    "import_mode": import_mode,
+                    "root_path": str(cerea_root),
+                    "center_x": center_x,
+                    "center_y": center_y,
+                }
+                st.rerun()
+            else:
+                reset_count = reset_all_field_states(
+                    import_mode, cerea_root, center_x, center_y
+                )
+                clear_all_track_input_state()
+                if reset_count:
+                    st.success(f"Reset all changes in {reset_count} field(s).")
+                else:
+                    st.info("No field state to reset.")
+                st.rerun()
+
+    if hasattr(st, "dialog"):
+        reset_field_target = st.session_state.get("reset_field_target")
+        if reset_field_target:
+            show_reset_field_dialog(
+                reset_field_target["field_key"],
+                reset_field_target["import_mode"],
+                reset_field_target["contour_source"],
+                reset_field_target["patterns_source"],
+                reset_field_target["center_x"],
+                reset_field_target["center_y"],
+            )
+
+        reset_all_target = st.session_state.get("reset_all_target")
+        if reset_all_target:
+            show_reset_all_dialog(
+                reset_all_target["import_mode"],
+                reset_all_target["root_path"],
+                reset_all_target["center_x"],
+                reset_all_target["center_y"],
+            )
+
+    with editor_col:
         source_ok = contour_file.exists() if import_mode == "Cerea txt" else patterns_file.exists()
         if not source_ok:
             missing_msg = "contour.txt not found."
@@ -688,7 +809,6 @@ if uploaded_input_zip is not None:
             st.warning(missing_msg)
             st.stop()
 
-        current_key = field_key(import_mode, selected_farm, selected_field)
         current_state = ensure_field_state(
             current_key,
             import_mode,
@@ -943,30 +1063,6 @@ if uploaded_input_zip is not None:
                 and hasattr(st, "dialog")
             ):
                 show_rename_dialog(current_key, int(rename_target["track_id"]))
-
-        if st.button("Reset all changes"):
-            reset_count = reset_all_field_states(
-                import_mode, cerea_root, center_x, center_y
-            )
-            clear_all_track_input_state()
-            if reset_count:
-                st.success(f"Reset all changes in {reset_count} field(s).")
-            else:
-                st.info("No field state to reset.")
-            st.rerun()
-
-        if st.button("Reset field changes"):
-            reset_field_state(
-                current_key,
-                import_mode,
-                contour_file,
-                patterns_file,
-                center_x,
-                center_y,
-            )
-            clear_track_input_state(current_key)
-            st.success("Field changes reset to imported data.")
-            st.rerun()
 
         export_col_1, export_col_2, export_col_3 = st.columns(3)
 
