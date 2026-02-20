@@ -352,7 +352,41 @@ if uploaded_input_zip is not None:
 
     with field_panel_col:
         st.divider()
-        if st.button("Reset field changes", use_container_width=True):
+        st.markdown(
+            """
+            <style>
+            div.st-key-reset_field_changes_btn button,
+            div.st-key-reset_all_changes_btn button {
+                background-color: #FFFFE7 !important;
+                color: #8C5E07 !important;
+                border-color: #E6C98B !important;
+            }
+            div.st-key-reset_field_changes_btn button:hover,
+            div.st-key-reset_all_changes_btn button:hover,
+            div.st-key-reset_field_changes_btn button:active,
+            div.st-key-reset_all_changes_btn button:active {
+                background-color: #FFF8CC !important;
+                color: #8C5E07 !important;
+                border-color: #D2AF6B !important;
+            }
+            div.st-key-reset_field_changes_btn button:focus,
+            div.st-key-reset_all_changes_btn button:focus,
+            div.st-key-reset_field_changes_btn button:focus-visible,
+            div.st-key-reset_all_changes_btn button:focus-visible {
+                background-color: #FFFFE7 !important;
+                color: #8C5E07 !important;
+                border-color: #E6C98B !important;
+                box-shadow: none !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            "Reset field changes",
+            key="reset_field_changes_btn",
+            use_container_width=True,
+        ):
             if hasattr(st, "dialog"):
                 st.session_state["reset_field_target"] = {
                     "field_key": current_key,
@@ -376,7 +410,11 @@ if uploaded_input_zip is not None:
                 st.success("Field changes reset to imported data.")
                 st.rerun()
 
-        if st.button("Reset all changes", use_container_width=True):
+        if st.button(
+            "Reset all changes",
+            key="reset_all_changes_btn",
+            use_container_width=True,
+        ):
             if hasattr(st, "dialog"):
                 st.session_state["reset_all_target"] = {
                     "import_mode": import_mode,
