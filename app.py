@@ -35,6 +35,8 @@ from src.cerea_gis.universe import read_center
 
 st.set_page_config(layout="wide")
 st.title("Cerea 300 GIS")
+if "show_intro_info" not in st.session_state:
+    st.session_state.show_intro_info = True
 st.markdown(
     """
     <style>
@@ -79,6 +81,21 @@ def prepare_uploaded_root(uploaded_zip):
         clear_all_track_input_state()
 
     return Path(st.session_state.input_extract_dir)
+
+
+def clear_uploaded_root_state():
+    previous_dir = st.session_state.get("input_extract_dir")
+    if previous_dir:
+        shutil.rmtree(previous_dir, ignore_errors=True)
+
+    st.session_state.pop("input_zip_sig", None)
+    st.session_state.pop("input_extract_dir", None)
+    st.session_state.field_edits = {}
+    st.session_state.selected_field_by_farm = {}
+    st.session_state.pop("reset_field_target", None)
+    st.session_state.pop("reset_all_target", None)
+    st.session_state.pop("export_bundle", None)
+    clear_all_track_input_state()
 
 
 if hasattr(st, "dialog"):
@@ -179,7 +196,8 @@ if hasattr(st, "dialog"):
                 st.rerun()
 
 
-st.info(
+if st.session_state.get("show_intro_info", True):
+    st.info(
     """
     Upload one `.zip` and select import mode.
 
@@ -207,7 +225,7 @@ st.info(
         └─ Field1_patterns.shp
     ```
     """
-)
+    )
 
 mode_col, input_col, check_col = st.columns([1, 2, 2])
 
@@ -220,6 +238,14 @@ with input_col:
         type=["zip"],
         accept_multiple_files=False,
     )
+
+if uploaded_input_zip is None:
+    intro_was_hidden = not st.session_state.get("show_intro_info", True)
+    if st.session_state.get("input_extract_dir"):
+        clear_uploaded_root_state()
+    st.session_state.show_intro_info = True
+    if intro_was_hidden:
+        st.rerun()
 
 with check_col:
     st.caption("Input structure check appears after upload.")
@@ -249,7 +275,14 @@ if uploaded_input_zip is not None:
                     st.write(f"- {warn}")
 
     if validation["issues"]:
+        if not st.session_state.get("show_intro_info", True):
+            st.session_state.show_intro_info = True
+            st.rerun()
         st.stop()
+
+    if st.session_state.get("show_intro_info", True):
+        st.session_state.show_intro_info = False
+        st.rerun()
 
     center_x = None
     center_y = None
