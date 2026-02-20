@@ -267,8 +267,23 @@ if uploaded_input_zip is not None:
         st.stop()
 
     field_panel_col, editor_col = st.columns([1, 3])
+    left_panel = field_panel_col.container(key="left_panel_container")
 
-    with field_panel_col:
+    st.markdown(
+        """
+        <style>
+        div.st-key-left_panel_container {
+            background-color: #ffffff;
+            border-right: 1px solid #d6d6c8;
+            border-radius: 0.35rem;
+            padding: 0.45rem 0.65rem 0.65rem 0.45rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with left_panel:
         st.subheader("Farm")
         selected_farm = st.selectbox("Farm", farm_names, label_visibility="collapsed")
         farm_path = cerea_root / selected_farm
@@ -293,7 +308,7 @@ if uploaded_input_zip is not None:
     ):
         st.session_state.selected_field_by_farm[farm_session_key] = field_names[0]
 
-    with field_panel_col:
+    with left_panel:
         st.subheader("Fields")
         st.caption("Edited fields are highlighted in light green.")
 
@@ -350,7 +365,7 @@ if uploaded_input_zip is not None:
     )
     current_key = field_key(import_mode, selected_farm, selected_field)
 
-    with field_panel_col:
+    with left_panel:
         st.divider()
         st.markdown(
             """
