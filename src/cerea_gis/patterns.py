@@ -1,46 +1,53 @@
-from pathlib import Path
-from shapely.geometry import LineString
 from collections import defaultdict
+from pathlib import Path
+
+from shapely.geometry import LineString
 
 
 def parse_patterns(pattern_path: Path, center_x: float, center_y: float):
     """
-    Parses patterns.txt and returns list of (name, LineString)
+    Parses patterns.txt and returns list of (name, LineString).
 
-    Handles:
-    - AB lines (single segment)
-    - Curves (multiple segments with same name)
+    Supported row layouts:
+    - one segment: id,mode,name,x1,y1,z1,x2,y2,z2
+    - polyline row: id,mode,name,x1,y1,z1,x2,y2,z2,...,xn,yn,zn
+    - multi-row polyline with repeated name (rows are merged in file order)
     """
 
-    # name → list of points
     pattern_points = defaultdict(list)
 
     with pattern_path.open("r", encoding="utf-8") as f:
         for row in f:
-            parts = row.strip().split(",")
-
-            if len(parts) < 8:
+            parts = [p.strip() for p in row.strip().split(",")]
+            if len(parts) < 9:
                 continue
 
             name = parts[2]
+            row_points = []
 
-            dx1, dy1 = float(parts[3]), float(parts[4])
-            dx2, dy2 = float(parts[6]), float(parts[7])
+            # Coordinates start at index 3 and are encoded as repeating x,y,z triplets.
+            for i in range(3, len(parts) - 2, 3):
+                try:
+                    dx = float(parts[i])
+                    dy = float(parts[i + 1])
+                except (ValueError, IndexError):
+                    continue
+                row_points.append((center_x + dx, center_y + dy))
 
-            p1 = (center_x + dx1, center_y + dy1)
-            p2 = (center_x + dx2, center_y + dy2)
+            if len(row_points) < 2:
+                continue
 
             if not pattern_points[name]:
-                # first segment → add both points
-                pattern_points[name].append(p1)
-                pattern_points[name].append(p2)
+                pattern_points[name].extend(row_points)
+                continue
+
+            # Avoid duplicate connecting point when rows are split into segments.
+            if pattern_points[name][-1] == row_points[0]:
+                pattern_points[name].extend(row_points[1:])
             else:
-                # subsequent segments → add only end point
-                pattern_points[name].append(p2)
+                pattern_points[name].extend(row_points)
 
-    # Convert to LineStrings
     result = []
-
     for name, points in pattern_points.items():
         if len(points) >= 2:
             result.append((name, LineString(points)))
