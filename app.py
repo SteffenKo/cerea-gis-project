@@ -17,6 +17,7 @@ from src.cerea_gis.io_helpers import (
     get_fields,
     get_field_sources,
     resolve_import_root,
+    resolve_universe_path,
     validate_import_structure,
 )
 from src.cerea_gis.state_helpers import (
@@ -180,11 +181,31 @@ if hasattr(st, "dialog"):
 
 st.info(
     """
-    **Welcome to Cerea 300 GIS! You can extract your Cerea 300 files, manipulate your patterns and export them in ShapeFile format.**
+    Upload one `.zip` and select import mode.
 
-    - Upload exactly one `.zip` file (not individual files).
-    - Use **Cerea txt** when the zip contains `universe.txt` and farm/field folders with `patterns.txt` (`contour.txt` optional).
-    - Use **Exported shp** when the zip contains farm folders with `patterns/*_patterns.shp` (The export format of this application).
+    **Cerea txt**
+    - Required: `universe.txt`
+    - Field folders: `patterns.txt` (required), `contour.txt` (optional)
+    - Farms can be:
+      1. directly next to `universe.txt`, or
+      2. inside one intermediate folder (for example `data/`)
+    ```
+    zip
+    ├─ universe.txt
+    └─ data/ (name can vary)
+       └─ Farm/Field/{contour.txt, patterns.txt}
+    ```
+
+    **Exported shp**
+    - Field name is taken from filename before `_patterns` (example: `Field1_patterns.shp`)
+    - Include full shapefile sidecar files (`.shp`, `.shx`, `.dbf`, `.prj`)
+    ```
+    zip
+    ├─ contours
+    |  └─ Field1_contour.shp
+    └─ patterns
+        └─ Field1_patterns.shp
+    ```
     """
 )
 
@@ -233,8 +254,8 @@ if uploaded_input_zip is not None:
     center_x = None
     center_y = None
     if import_mode == "Cerea txt":
-        universe_path = cerea_root / "universe.txt"
-        if not universe_path.exists():
+        universe_path = resolve_universe_path(cerea_root)
+        if universe_path is None:
             st.error("universe.txt not found.")
             st.stop()
         center_x, center_y = read_center(universe_path)

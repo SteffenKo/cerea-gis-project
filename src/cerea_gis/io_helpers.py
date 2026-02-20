@@ -26,13 +26,52 @@ def get_exported_fields(farm_path: Path):
     return sorted(field_names)
 
 
+def _looks_like_cerea_field_dir(field_dir: Path):
+    return field_dir.is_dir() and (
+        (field_dir / "contour.txt").exists() or (field_dir / "patterns.txt").exists()
+    )
+
+
+def _has_cerea_txt_farms(root_dir: Path):
+    for farm_dir in root_dir.iterdir():
+        if not farm_dir.is_dir():
+            continue
+        for field_dir in farm_dir.iterdir():
+            if _looks_like_cerea_field_dir(field_dir):
+                return True
+    return False
+
+
+def resolve_universe_path(root_path: Path):
+    direct_path = root_path / "universe.txt"
+    if direct_path.exists():
+        return direct_path
+
+    parent_path = root_path.parent / "universe.txt"
+    if parent_path.exists():
+        return parent_path
+
+    return None
+
+
 def resolve_import_root(extract_dir: Path, import_mode: str):
     candidates = [extract_dir] + [d for d in extract_dir.iterdir() if d.is_dir()]
 
     if import_mode == "Cerea txt":
         for candidate in candidates:
-            if (candidate / "universe.txt").exists():
+            if not (candidate / "universe.txt").exists():
+                continue
+
+            if _has_cerea_txt_farms(candidate):
                 return candidate
+
+            nested_farm_roots = [
+                sub_dir
+                for sub_dir in candidate.iterdir()
+                if sub_dir.is_dir() and _has_cerea_txt_farms(sub_dir)
+            ]
+            if nested_farm_roots:
+                return sorted(nested_farm_roots, key=lambda p: p.name)[0]
     else:
         for candidate in candidates:
             farm_dirs = [d for d in candidate.iterdir() if d.is_dir()]
@@ -66,7 +105,7 @@ def validate_import_structure(import_mode: str, root_path: Path):
         return {"issues": issues, "warnings": warnings, "stats": stats}
 
     if import_mode == "Cerea txt":
-        if not (root_path / "universe.txt").exists():
+        if resolve_universe_path(root_path) is None:
             issues.append("Missing required file: universe.txt")
 
         for farm_dir in farms:
