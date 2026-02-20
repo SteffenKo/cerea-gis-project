@@ -98,6 +98,24 @@ def clear_uploaded_root_state():
     clear_all_track_input_state()
 
 
+def delete_track_from_field_state(field_state_key: str, track_id: int):
+    field_edits = st.session_state.get("field_edits", {})
+    state = field_edits.get(field_state_key)
+    if not state:
+        return
+
+    original_len = len(state.get("line_items", []))
+    state["line_items"] = [
+        item for item in state.get("line_items", []) if item.get("id") != track_id
+    ]
+    if len(state["line_items"]) == original_len:
+        return
+
+    state["dirty"] = True
+    clear_track_input_state(field_state_key)
+    st.session_state["track_delete_notice"] = "Track deleted."
+
+
 if hasattr(st, "dialog"):
     @st.dialog("Rename track")
     def show_rename_dialog(field_state_key: str, track_id: int):
@@ -543,7 +561,6 @@ if uploaded_input_zip is not None:
             )
             map_height = max(430, min(900, int(list_block_height + 170)))
 
-            deleted_track_id = None
             original_line_items = list(line_items)
             ordered_line_items = list(line_items)
             current_key_safe = safe_widget_suffix(current_key)
@@ -699,12 +716,13 @@ if uploaded_input_zip is not None:
                 )
                 for item in display_items:
                     delete_btn_key = f"delete_track_{current_key_safe}_{item['id']}"
-                    if st.button(
+                    st.button(
                         "x",
                         key=delete_btn_key,
                         use_container_width=True,
-                    ):
-                        deleted_track_id = item["id"]
+                        on_click=delete_track_from_field_state,
+                        args=(current_key, int(item["id"])),
+                    )
 
             with rename_col:
                 st.markdown(
@@ -740,19 +758,14 @@ if uploaded_input_zip is not None:
                         use_container_width=True,
                     )
 
-            if deleted_track_id is not None:
-                current_state["line_items"] = [
-                    item for item in display_items if item["id"] != deleted_track_id
-                ]
+            delete_notice = st.session_state.pop("track_delete_notice", None)
+            if delete_notice:
+                st.success(delete_notice)
+
+            if [i["id"] for i in display_items] != [i["id"] for i in original_line_items]:
+                current_state["line_items"] = display_items
                 current_state["dirty"] = True
                 line_items = current_state["line_items"]
-                clear_track_input_state(current_key)
-                st.success("Track deleted.")
-            else:
-                if [i["id"] for i in display_items] != [i["id"] for i in original_line_items]:
-                    current_state["line_items"] = display_items
-                    current_state["dirty"] = True
-                    line_items = current_state["line_items"]
 
             rename_target = st.session_state.get("rename_target")
             if (
