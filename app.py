@@ -117,6 +117,57 @@ def delete_track_from_field_state(field_state_key: str, track_id: int):
     st.session_state["track_delete_notice"] = "Track deleted."
 
 
+def build_field_export_report_lines(
+    import_mode: str,
+    farm_name: str,
+    field_name: str,
+    contour_source: Path,
+    patterns_source: Path,
+    state: dict | None = None,
+):
+    lines = []
+    field_label = f"{farm_name}/{field_name}"
+
+    has_contour_source = contour_source.exists()
+    has_patterns_source = patterns_source.exists()
+
+    if not has_contour_source and not has_patterns_source:
+        lines.append(f"- Partial {field_label}: no source files found.")
+    else:
+        missing_parts = []
+        if not has_contour_source:
+            missing_parts.append("contour")
+        if not has_patterns_source:
+            missing_parts.append("patterns")
+        if missing_parts:
+            lines.append(
+                f"- Partial {field_label}: missing {' and '.join(missing_parts)} source file(s)."
+            )
+
+    if import_mode == "Exported shp":
+        if has_patterns_source:
+            missing_patterns_sidecars = get_missing_shapefile_sidecars(patterns_source)
+            if missing_patterns_sidecars:
+                sidecars_text = ", ".join(missing_patterns_sidecars)
+                lines.append(
+                    f"- Partial {field_label}: patterns sidecar file(s) missing ({patterns_source.name}): {sidecars_text}"
+                )
+        if has_contour_source:
+            missing_contour_sidecars = get_missing_shapefile_sidecars(contour_source)
+            if missing_contour_sidecars:
+                sidecars_text = ", ".join(missing_contour_sidecars)
+                lines.append(
+                    f"- Partial {field_label}: contour sidecar file(s) missing ({contour_source.name}): {sidecars_text}"
+                )
+
+    if state is not None and state.get("polygon") is None and not state.get("line_items", []):
+        lines.append(
+            f"- Partial {field_label}: current field state has no contour geometry and no tracks."
+        )
+
+    return lines
+
+
 if hasattr(st, "dialog"):
     @st.dialog("Rename track")
     def show_rename_dialog(field_state_key: str, track_id: int):
@@ -802,6 +853,14 @@ if uploaded_input_zip is not None:
 
         with export_col_1:
             if st.button("Prepare current field export", use_container_width=True):
+                current_export_report_lines = build_field_export_report_lines(
+                    import_mode,
+                    selected_farm,
+                    selected_field,
+                    contour_file,
+                    patterns_file,
+                    current_state,
+                )
                 export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
                 export_field(
                     polygon,
@@ -818,12 +877,24 @@ if uploaded_input_zip is not None:
                 }
                 current_state["dirty"] = False
                 st.success("Current field export prepared.")
+                if current_export_report_lines:
+                    st.info(
+                        "\n".join(
+                            ["Export report (current field):"]
+                            + current_export_report_lines
+                        )
+                    )
 
         with export_col_2:
             if st.button("Prepare all fields export", use_container_width=True):
                 export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
-                exported_count = export_all_fields(
-                    import_mode, cerea_root, export_root, center_x, center_y
+                exported_count, export_report_lines = export_all_fields(
+                    import_mode,
+                    cerea_root,
+                    export_root,
+                    center_x,
+                    center_y,
+                    with_report=True,
                 )
                 zip_bytes = create_export_zip_bytes(export_root)
                 shutil.rmtree(export_root, ignore_errors=True)
@@ -832,6 +903,13 @@ if uploaded_input_zip is not None:
                     "label": "all fields",
                 }
                 st.success(f"Prepared export for {exported_count} field(s).")
+                if export_report_lines:
+                    st.info(
+                        "\n".join(
+                            ["Export report (skipped/partial fields):"]
+                            + export_report_lines
+                        )
+                    )
 
         with export_col_3:
             if st.button("Prepare all changes export", use_container_width=True):
@@ -845,11 +923,25 @@ if uploaded_input_zip is not None:
                 else:
                     export_root = Path(tempfile.mkdtemp(prefix="cerea_export_"))
                     exported_changes = 0
+                    changes_export_report_lines = []
                     for key in changed_keys:
                         key_mode, farm_name, field_name = parse_field_key(key)
                         if key_mode != import_mode:
                             continue
                         state = st.session_state.field_edits[key]
+                        contour_source, patterns_source = get_field_sources(
+                            import_mode, cerea_root, farm_name, field_name
+                        )
+                        changes_export_report_lines.extend(
+                            build_field_export_report_lines(
+                                import_mode,
+                                farm_name,
+                                field_name,
+                                contour_source,
+                                patterns_source,
+                                state,
+                            )
+                        )
                         export_field(
                             state["polygon"],
                             state["line_items"],
@@ -868,6 +960,13 @@ if uploaded_input_zip is not None:
                             "label": "all changes",
                         }
                         st.success(f"Prepared export for {exported_changes} changed field(s).")
+                        if changes_export_report_lines:
+                            st.info(
+                                "\n".join(
+                                    ["Export report (all changes):"]
+                                    + changes_export_report_lines
+                                )
+                            )
                     else:
                         shutil.rmtree(export_root, ignore_errors=True)
                         st.info("No changed fields for current import mode.")

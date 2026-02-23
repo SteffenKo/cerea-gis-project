@@ -14,52 +14,78 @@ from src.cerea_gis.patterns import parse_patterns
 
 
 @st.cache_data
-def load_field_data(contour_file, patterns_file, center_x, center_y):
+def load_field_data(contour_file, patterns_file, center_x, center_y, return_report=False):
     polygon = None
+    notes = []
     if contour_file.exists():
-        polygon = parse_contour(contour_file, center_x, center_y)
+        try:
+            polygon = parse_contour(contour_file, center_x, center_y)
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            polygon = None
+            notes.append(f"Unreadable contour source: {contour_file.name}")
 
     line_items = []
     if patterns_file.exists():
-        raw_lines = parse_patterns(patterns_file, center_x, center_y)
+        try:
+            raw_lines = parse_patterns(patterns_file, center_x, center_y)
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            raw_lines = []
+            notes.append(f"Unreadable patterns source: {patterns_file.name}")
         line_items = [
             {"id": idx, "name": name, "geometry": geom}
             for idx, (name, geom) in enumerate(raw_lines)
         ]
 
+    if return_report:
+        return polygon, line_items, notes
     return polygon, line_items
 
 
 @st.cache_data
-def load_field_data_from_shapefiles(contour_shp, patterns_shp):
+def load_field_data_from_shapefiles(contour_shp, patterns_shp, return_report=False):
     polygon = None
+    notes = []
     contour_usable = contour_shp.exists() and not get_missing_shapefile_sidecars(contour_shp)
     if contour_usable:
-        gdf_contour = gpd.read_file(contour_shp)
-        if not gdf_contour.empty:
-            if gdf_contour.crs is None:
-                gdf_contour = gdf_contour.set_crs(epsg=4326)
-            gdf_contour = gdf_contour.to_crs(epsg=25832)
-            polygon = gdf_contour.geometry.unary_union
+        try:
+            gdf_contour = gpd.read_file(contour_shp)
+            if not gdf_contour.empty:
+                if gdf_contour.crs is None:
+                    gdf_contour = gdf_contour.set_crs(epsg=4326)
+                gdf_contour = gdf_contour.to_crs(epsg=25832)
+                polygon = gdf_contour.geometry.unary_union
+        except (OSError, ValueError, TypeError):
+            notes.append(f"Unreadable contour source: {contour_shp.name}")
+    elif contour_shp.exists():
+        missing = ", ".join(get_missing_shapefile_sidecars(contour_shp))
+        notes.append(f"Contour sidecars missing ({contour_shp.name}): {missing}")
 
     line_items = []
     patterns_usable = patterns_shp.exists() and not get_missing_shapefile_sidecars(
         patterns_shp
     )
     if patterns_usable:
-        gdf_lines = gpd.read_file(patterns_shp)
-        if not gdf_lines.empty:
-            if gdf_lines.crs is None:
-                gdf_lines = gdf_lines.set_crs(epsg=4326)
-            gdf_lines = gdf_lines.to_crs(epsg=25832)
+        try:
+            gdf_lines = gpd.read_file(patterns_shp)
+            if not gdf_lines.empty:
+                if gdf_lines.crs is None:
+                    gdf_lines = gdf_lines.set_crs(epsg=4326)
+                gdf_lines = gdf_lines.to_crs(epsg=25832)
 
-            has_name_col = "name" in gdf_lines.columns
-            for idx, row in gdf_lines.reset_index(drop=True).iterrows():
-                name = f"Track {idx + 1}"
-                if has_name_col and row["name"] is not None and str(row["name"]).strip():
-                    name = str(row["name"])
-                line_items.append({"id": idx, "name": name, "geometry": row.geometry})
+                has_name_col = "name" in gdf_lines.columns
+                for idx, row in gdf_lines.reset_index(drop=True).iterrows():
+                    name = f"Track {idx + 1}"
+                    if has_name_col and row["name"] is not None and str(row["name"]).strip():
+                        name = str(row["name"])
+                    line_items.append({"id": idx, "name": name, "geometry": row.geometry})
+        except (OSError, ValueError, TypeError):
+            notes.append(f"Unreadable patterns source: {patterns_shp.name}")
+    elif patterns_shp.exists():
+        missing = ", ".join(get_missing_shapefile_sidecars(patterns_shp))
+        notes.append(f"Patterns sidecars missing ({patterns_shp.name}): {missing}")
 
+    if return_report:
+        return polygon, line_items, notes
     return polygon, line_items
 
 
@@ -172,8 +198,11 @@ def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None)
     return reset_count
 
 
-def export_all_fields(import_mode, root_path, output_root, center_x=None, center_y=None):
+def export_all_fields(
+    import_mode, root_path, output_root, center_x=None, center_y=None, with_report=False
+):
     exported_count = 0
+    report_lines = []
     for farm_dir in get_farms(root_path):
         if import_mode == "Cerea txt":
             field_names = [field_dir.name for field_dir in get_fields(farm_dir)]
@@ -184,25 +213,57 @@ def export_all_fields(import_mode, root_path, output_root, center_x=None, center
             contour_source, patterns_source = get_field_sources(
                 import_mode, root_path, farm_dir.name, field_name
             )
-            source_exists = contour_source.exists() or patterns_source.exists()
+            has_contour_source = contour_source.exists()
+            has_patterns_source = patterns_source.exists()
+            source_exists = has_contour_source or has_patterns_source
+            field_label = f"{farm_dir.name}/{field_name}"
             if not source_exists:
+                report_lines.append(f"- Skipped {field_label}: no source files found.")
                 continue
 
             key = field_key(import_mode, farm_dir.name, field_name)
+            field_notes = []
+            loaded_from_state = False
 
             if "field_edits" in st.session_state and key in st.session_state.field_edits:
                 state = st.session_state.field_edits[key]
                 polygon = state["polygon"]
                 line_items = state["line_items"]
+                loaded_from_state = True
             else:
                 if import_mode == "Cerea txt":
-                    polygon, line_items = load_field_data(
-                        contour_source, patterns_source, center_x, center_y
+                    polygon, line_items, field_notes = load_field_data(
+                        contour_source,
+                        patterns_source,
+                        center_x,
+                        center_y,
+                        return_report=True,
                     )
                 else:
-                    polygon, line_items = load_field_data_from_shapefiles(
-                        contour_source, patterns_source
+                    polygon, line_items, field_notes = load_field_data_from_shapefiles(
+                        contour_source,
+                        patterns_source,
+                        return_report=True,
                     )
+
+            if not has_contour_source or not has_patterns_source:
+                missing_parts = []
+                if not has_contour_source:
+                    missing_parts.append("contour")
+                if not has_patterns_source:
+                    missing_parts.append("patterns")
+                report_lines.append(
+                    f"- Partial {field_label}: missing {' and '.join(missing_parts)} source file(s)."
+                )
+
+            for note in field_notes:
+                report_lines.append(f"- Partial {field_label}: {note}")
+
+            if not loaded_from_state and polygon is None and not line_items:
+                report_lines.append(
+                    f"- Skipped {field_label}: no usable contour or patterns data."
+                )
+                continue
 
             export_field(
                 polygon,
@@ -217,4 +278,6 @@ def export_all_fields(import_mode, root_path, output_root, center_x=None, center
 
             exported_count += 1
 
+    if with_report:
+        return exported_count, report_lines
     return exported_count
