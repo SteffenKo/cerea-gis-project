@@ -2,6 +2,7 @@ import hashlib
 import io
 import shutil
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -36,6 +37,10 @@ from src.cerea_gis.universe import read_center
 
 st.set_page_config(layout="wide")
 st.title("Cerea 300 GIS")
+
+BACKUP_REMINDER_AFTER_SECONDS = 15 * 60
+BACKUP_REMINDER_DIRTY_THRESHOLD = 5
+
 if "show_intro_info" not in st.session_state:
     st.session_state.show_intro_info = True
 st.markdown(
@@ -77,6 +82,10 @@ def prepare_uploaded_root(uploaded_zip):
         st.session_state.selected_field_by_farm = {}
         st.session_state.pop("reset_field_target", None)
         st.session_state.pop("reset_all_target", None)
+        st.session_state.pop("last_full_backup_export_ts", None)
+        st.session_state.pop("backup_reminder_last_field_key", None)
+        st.session_state.pop("backup_reminder_last_shown_signature", None)
+        st.session_state.pop("backup_reminder_visible_field_key", None)
         if "export_bundle" in st.session_state:
             del st.session_state["export_bundle"]
         clear_all_track_input_state()
@@ -95,6 +104,10 @@ def clear_uploaded_root_state():
     st.session_state.selected_field_by_farm = {}
     st.session_state.pop("reset_field_target", None)
     st.session_state.pop("reset_all_target", None)
+    st.session_state.pop("last_full_backup_export_ts", None)
+    st.session_state.pop("backup_reminder_last_field_key", None)
+    st.session_state.pop("backup_reminder_last_shown_signature", None)
+    st.session_state.pop("backup_reminder_visible_field_key", None)
     st.session_state.pop("export_bundle", None)
     clear_all_track_input_state()
 
@@ -166,6 +179,45 @@ def build_field_export_report_lines(
         )
 
     return lines
+
+
+def get_dirty_field_count_for_mode(import_mode: str):
+    count = 0
+    for key, state in st.session_state.get("field_edits", {}).items():
+        if not state.get("dirty"):
+            continue
+        key_mode, _, _ = parse_field_key(key)
+        if key_mode == import_mode:
+            count += 1
+    return count
+
+
+def get_backup_reminder_signature(
+    dirty_count: int, last_backup_ts, seconds_since_backup: float | None
+):
+    if dirty_count <= 0:
+        return None
+
+    parts = []
+
+    if last_backup_ts is None:
+        # Re-trigger every threshold block while no full backup exists.
+        no_backup_bucket = dirty_count // BACKUP_REMINDER_DIRTY_THRESHOLD
+        parts.append(f"no_backup:{no_backup_bucket}")
+    elif dirty_count >= BACKUP_REMINDER_DIRTY_THRESHOLD:
+        dirty_bucket = dirty_count // BACKUP_REMINDER_DIRTY_THRESHOLD
+        parts.append(f"dirty:{dirty_bucket}")
+
+    if (
+        seconds_since_backup is not None
+        and seconds_since_backup >= BACKUP_REMINDER_AFTER_SECONDS
+    ):
+        age_bucket = int(seconds_since_backup // BACKUP_REMINDER_AFTER_SECONDS)
+        parts.append(f"age:{age_bucket}")
+
+    if not parts:
+        return None
+    return "|".join(parts)
 
 
 if hasattr(st, "dialog"):
@@ -849,6 +901,40 @@ if uploaded_input_zip is not None:
             ):
                 show_rename_dialog(current_key, int(rename_target["track_id"]))
 
+        dirty_count = get_dirty_field_count_for_mode(import_mode)
+        last_backup_ts = st.session_state.get("last_full_backup_export_ts")
+        seconds_since_backup = None
+        if last_backup_ts is not None:
+            seconds_since_backup = max(0.0, time.time() - float(last_backup_ts))
+        reminder_signature = get_backup_reminder_signature(
+            dirty_count, last_backup_ts, seconds_since_backup
+        )
+        if reminder_signature is None:
+            st.session_state.pop("backup_reminder_last_shown_signature", None)
+            st.session_state.pop("backup_reminder_visible_field_key", None)
+
+        last_reminder_field_key = st.session_state.get("backup_reminder_last_field_key")
+        field_changed = (
+            last_reminder_field_key is not None and last_reminder_field_key != current_key
+        )
+        if field_changed:
+            st.session_state["backup_reminder_visible_field_key"] = None
+        last_shown_signature = st.session_state.get("backup_reminder_last_shown_signature")
+        show_backup_reminder = (
+            reminder_signature is not None
+            and reminder_signature != last_shown_signature
+            and field_changed
+        )
+        if show_backup_reminder:
+            st.session_state["backup_reminder_last_shown_signature"] = reminder_signature
+            st.session_state["backup_reminder_visible_field_key"] = current_key
+        if st.session_state.get("backup_reminder_visible_field_key") == current_key:
+            st.info(
+                'Reminder: You can use "Prepare all fields export" to download a backup. '
+                'You can re-import the backup via "Exported shp" mode in case of a server error.'
+            )
+        st.session_state["backup_reminder_last_field_key"] = current_key
+
         export_col_1, export_col_2, export_col_3 = st.columns(3)
 
         with export_col_1:
@@ -902,6 +988,7 @@ if uploaded_input_zip is not None:
                     "bytes": zip_bytes,
                     "label": "all fields",
                 }
+                st.session_state["last_full_backup_export_ts"] = time.time()
                 st.success(f"Prepared export for {exported_count} field(s).")
                 if export_report_lines:
                     st.info(
