@@ -15,21 +15,42 @@ def get_fields(farm_path: Path):
 
 def get_exported_fields(farm_path: Path):
     patterns_dir = farm_path / "patterns"
-    if not patterns_dir.exists():
-        return []
+    contours_dir = farm_path / "contours"
 
-    field_names = []
-    for patterns_file in patterns_dir.glob("*_patterns.shp"):
-        field_name = patterns_file.stem.removesuffix("_patterns")
-        field_names.append(field_name)
+    field_names = set()
+    if patterns_dir.exists():
+        for patterns_file in patterns_dir.glob("*_patterns.shp"):
+            field_name = patterns_file.stem.removesuffix("_patterns")
+            field_names.add(field_name)
+
+    if contours_dir.exists():
+        for contour_file in contours_dir.glob("*_contour.shp"):
+            field_name = contour_file.stem.removesuffix("_contour")
+            field_names.add(field_name)
 
     return sorted(field_names)
 
 
+def get_missing_shapefile_sidecars(shp_path: Path):
+    sidecar_exts = [".shx", ".dbf", ".prj"]
+    return [ext for ext in sidecar_exts if not shp_path.with_suffix(ext).exists()]
+
+
 def _looks_like_cerea_field_dir(field_dir: Path):
-    return field_dir.is_dir() and (
-        (field_dir / "contour.txt").exists() or (field_dir / "patterns.txt").exists()
-    )
+    if not field_dir.is_dir():
+        return False
+
+    # A real Cerea field folder can contain contour/pattern files, but we also
+    # tolerate empty field folders. Wrapper directories usually contain further
+    # subfolders and should not be treated as fields.
+    has_known_files = (field_dir / "contour.txt").exists() or (
+        field_dir / "patterns.txt"
+    ).exists()
+    if has_known_files:
+        return True
+
+    has_subdirs = any(child.is_dir() for child in field_dir.iterdir())
+    return not has_subdirs
 
 
 def _has_cerea_txt_farms(root_dir: Path):
@@ -76,7 +97,7 @@ def resolve_import_root(extract_dir: Path, import_mode: str):
         for candidate in candidates:
             farm_dirs = [d for d in candidate.iterdir() if d.is_dir()]
             for farm_dir in farm_dirs:
-                if (farm_dir / "patterns").exists():
+                if (farm_dir / "patterns").exists() or (farm_dir / "contours").exists():
                     return candidate
 
     return extract_dir
@@ -118,31 +139,65 @@ def validate_import_structure(import_mode: str, root_path: Path):
                 contour_file = field_dir / "contour.txt"
                 patterns_file = field_dir / "patterns.txt"
                 if not contour_file.exists():
-                    issues.append(f"Missing contour.txt: {farm_dir.name}/{field_dir.name}")
+                    warnings.append(
+                        f"Missing optional contour.txt: {farm_dir.name}/{field_dir.name}"
+                    )
                 if not patterns_file.exists():
                     warnings.append(
                         f"Missing optional patterns.txt: {farm_dir.name}/{field_dir.name}"
+                    )
+                if not contour_file.exists() and not patterns_file.exists():
+                    warnings.append(
+                        "No source files in field folder: "
+                        f"{farm_dir.name}/{field_dir.name} "
+                        "(needs contour.txt and/or patterns.txt)"
                     )
     else:
         for farm_dir in farms:
             patterns_dir = farm_dir / "patterns"
             contours_dir = farm_dir / "contours"
             if not patterns_dir.exists():
-                issues.append(f"Missing required patterns folder: {farm_dir.name}/patterns")
-                continue
+                warnings.append(f"Missing optional folder: {farm_dir.name}/patterns")
+            if not contours_dir.exists():
+                warnings.append(f"Missing optional folder: {farm_dir.name}/contours")
 
             field_names = get_exported_fields(farm_dir)
             if not field_names:
-                issues.append(f"No *_patterns.shp files found in: {farm_dir.name}/patterns")
+                warnings.append(
+                    "No field shapefiles found in farm: "
+                    f"{farm_dir.name} (expected *_patterns.shp and/or *_contour.shp)"
+                )
                 continue
 
             for field_name in field_names:
                 stats["fields"] += 1
+                patterns_shp = patterns_dir / f"{field_name}_patterns.shp"
+                if not patterns_shp.exists():
+                    warnings.append(
+                        f"Missing optional patterns shapefile: {farm_dir.name}/patterns/{patterns_shp.name}"
+                    )
+                else:
+                    missing_patterns_sidecars = get_missing_shapefile_sidecars(patterns_shp)
+                    if missing_patterns_sidecars:
+                        sidecars_text = ", ".join(missing_patterns_sidecars)
+                        warnings.append(
+                            "Missing sidecar(s) for patterns shapefile: "
+                            f"{farm_dir.name}/patterns/{patterns_shp.name} -> {sidecars_text}"
+                        )
+
                 contour_shp = contours_dir / f"{field_name}_contour.shp"
                 if not contour_shp.exists():
                     warnings.append(
                         f"Missing optional contour shapefile: {farm_dir.name}/contours/{field_name}_contour.shp"
                     )
+                else:
+                    missing_contour_sidecars = get_missing_shapefile_sidecars(contour_shp)
+                    if missing_contour_sidecars:
+                        sidecars_text = ", ".join(missing_contour_sidecars)
+                        warnings.append(
+                            "Missing sidecar(s) for optional contour shapefile: "
+                            f"{farm_dir.name}/contours/{contour_shp.name} -> {sidecars_text}"
+                        )
 
     return {"issues": issues, "warnings": warnings, "stats": stats}
 
@@ -177,13 +232,14 @@ def export_field(
         gdf_poly = gdf_poly.to_crs(epsg=4326)
         gdf_poly.to_file(contours_dir / f"{field_name}_contour.shp")
 
-    gdf_lines = gpd.GeoDataFrame(
-        [
-            {"id": item["id"], "name": item["name"], "geometry": item["geometry"]}
-            for item in ordered_line_items
-        ],
-        crs="EPSG:25832",
-    )
-    gdf_lines = gdf_lines.to_crs(epsg=4326)
-    gdf_lines.reset_index(drop=True, inplace=True)
-    gdf_lines.to_file(patterns_dir / f"{field_name}_patterns.shp")
+    if ordered_line_items:
+        gdf_lines = gpd.GeoDataFrame(
+            [
+                {"id": item["id"], "name": item["name"], "geometry": item["geometry"]}
+                for item in ordered_line_items
+            ],
+            crs="EPSG:25832",
+        )
+        gdf_lines = gdf_lines.to_crs(epsg=4326)
+        gdf_lines.reset_index(drop=True, inplace=True)
+        gdf_lines.to_file(patterns_dir / f"{field_name}_patterns.shp")

@@ -8,13 +8,16 @@ from src.cerea_gis.io_helpers import (
     get_farms,
     get_field_sources,
     get_fields,
+    get_missing_shapefile_sidecars,
 )
 from src.cerea_gis.patterns import parse_patterns
 
 
 @st.cache_data
 def load_field_data(contour_file, patterns_file, center_x, center_y):
-    polygon = parse_contour(contour_file, center_x, center_y)
+    polygon = None
+    if contour_file.exists():
+        polygon = parse_contour(contour_file, center_x, center_y)
 
     line_items = []
     if patterns_file.exists():
@@ -29,11 +32,9 @@ def load_field_data(contour_file, patterns_file, center_x, center_y):
 
 @st.cache_data
 def load_field_data_from_shapefiles(contour_shp, patterns_shp):
-    if not patterns_shp.exists():
-        raise ValueError(f"Patterns shapefile not found: {patterns_shp}")
-
     polygon = None
-    if contour_shp.exists():
+    contour_usable = contour_shp.exists() and not get_missing_shapefile_sidecars(contour_shp)
+    if contour_usable:
         gdf_contour = gpd.read_file(contour_shp)
         if not gdf_contour.empty:
             if gdf_contour.crs is None:
@@ -42,18 +43,22 @@ def load_field_data_from_shapefiles(contour_shp, patterns_shp):
             polygon = gdf_contour.geometry.unary_union
 
     line_items = []
-    gdf_lines = gpd.read_file(patterns_shp)
-    if not gdf_lines.empty:
-        if gdf_lines.crs is None:
-            gdf_lines = gdf_lines.set_crs(epsg=4326)
-        gdf_lines = gdf_lines.to_crs(epsg=25832)
+    patterns_usable = patterns_shp.exists() and not get_missing_shapefile_sidecars(
+        patterns_shp
+    )
+    if patterns_usable:
+        gdf_lines = gpd.read_file(patterns_shp)
+        if not gdf_lines.empty:
+            if gdf_lines.crs is None:
+                gdf_lines = gdf_lines.set_crs(epsg=4326)
+            gdf_lines = gdf_lines.to_crs(epsg=25832)
 
-        has_name_col = "name" in gdf_lines.columns
-        for idx, row in gdf_lines.reset_index(drop=True).iterrows():
-            name = f"Track {idx + 1}"
-            if has_name_col and row["name"] is not None and str(row["name"]).strip():
-                name = str(row["name"])
-            line_items.append({"id": idx, "name": name, "geometry": row.geometry})
+            has_name_col = "name" in gdf_lines.columns
+            for idx, row in gdf_lines.reset_index(drop=True).iterrows():
+                name = f"Track {idx + 1}"
+                if has_name_col and row["name"] is not None and str(row["name"]).strip():
+                    name = str(row["name"])
+                line_items.append({"id": idx, "name": name, "geometry": row.geometry})
 
     return polygon, line_items
 
@@ -157,11 +162,7 @@ def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None)
         contour_source, patterns_source = get_field_sources(
             import_mode, root_path, farm_name, field_name
         )
-        source_exists = (
-            contour_source.exists()
-            if import_mode == "Cerea txt"
-            else patterns_source.exists()
-        )
+        source_exists = contour_source.exists() or patterns_source.exists()
         if source_exists:
             reset_field_state(
                 key, import_mode, contour_source, patterns_source, center_x, center_y
@@ -183,8 +184,8 @@ def export_all_fields(import_mode, root_path, output_root, center_x=None, center
             contour_source, patterns_source = get_field_sources(
                 import_mode, root_path, farm_dir.name, field_name
             )
-            required_source = contour_source if import_mode == "Cerea txt" else patterns_source
-            if not required_source.exists():
+            source_exists = contour_source.exists() or patterns_source.exists()
+            if not source_exists:
                 continue
 
             key = field_key(import_mode, farm_dir.name, field_name)

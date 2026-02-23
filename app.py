@@ -15,6 +15,7 @@ from src.cerea_gis.io_helpers import (
     get_exported_fields,
     get_farms,
     get_fields,
+    get_missing_shapefile_sidecars,
     get_field_sources,
     resolve_import_root,
     resolve_universe_path,
@@ -221,7 +222,7 @@ if st.session_state.get("show_intro_info", True):
 
     **Cerea txt**
     - Required: `universe.txt`
-    - Field folders: `patterns.txt` (required), `contour.txt` (optional)
+    - Field folders: `patterns.txt` (optional), `contour.txt` (optional)
     - Farms can be:
       1. directly next to `universe.txt`, or
       2. inside one intermediate folder (for example `data/`)
@@ -233,7 +234,8 @@ if st.session_state.get("show_intro_info", True):
     ```
 
     **Exported shp**
-    - Field name is taken from filename before `_patterns` (example: `Field1_patterns.shp`)
+    - Field name is taken from filename before `_patterns` or `_contour`
+      (examples: `Field1_patterns.shp`, `Field1_contour.shp`)
     - Include full shapefile sidecar files (`.shp`, `.shx`, `.dbf`, `.prj`)
     ```
     zip
@@ -522,13 +524,30 @@ if uploaded_input_zip is not None:
             )
 
     with editor_col:
-        source_ok = contour_file.exists() if import_mode == "Cerea txt" else patterns_file.exists()
-        if not source_ok:
-            missing_msg = "contour.txt not found."
-            if import_mode == "Exported shp":
-                missing_msg = f"Patterns shapefile not found: {patterns_file.name}"
-            st.warning(missing_msg)
-            st.stop()
+        has_contour_source = contour_file.exists()
+        has_patterns_source = patterns_file.exists()
+        missing_patterns_sidecars = []
+        missing_contour_sidecars = []
+
+        if import_mode == "Exported shp":
+            if has_patterns_source:
+                missing_patterns_sidecars = get_missing_shapefile_sidecars(patterns_file)
+            if has_contour_source:
+                missing_contour_sidecars = get_missing_shapefile_sidecars(contour_file)
+
+            sidecar_infos = []
+            if missing_patterns_sidecars:
+                sidecars_text = ", ".join(missing_patterns_sidecars)
+                sidecar_infos.append(
+                    f"- Patterns sidecar file(s) missing: {sidecars_text}"
+                )
+            if missing_contour_sidecars:
+                sidecars_text = ", ".join(missing_contour_sidecars)
+                sidecar_infos.append(
+                    f"- Contour sidecar file(s) missing: {sidecars_text}"
+                )
+            if sidecar_infos:
+                st.info("\n".join(["Shapefile sidecar check:"] + sidecar_infos))
 
         current_state = ensure_field_state(
             current_key,
@@ -544,6 +563,10 @@ if uploaded_input_zip is not None:
         st.subheader(f"Field: {selected_field}")
         if not line_items:
             st.info("No tracks available for editing.")
+        # Keep widget layout visible in empty state.
+        show_widgets_when_empty = True
+        if not line_items and not show_widgets_when_empty:
+            pass
         else:
             # streamlit_sortables frontend metrics (v0.3.1):
             # container padding: 10px, body padding: 3px, item margin: 5px,
