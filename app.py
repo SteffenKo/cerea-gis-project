@@ -27,7 +27,6 @@ from src.cerea_gis.state_helpers import (
     ensure_field_state,
     export_all_fields,
     field_key,
-    mark_field_edit_clean,
     parse_field_key,
     rename_track_edit,
     reset_all_field_states,
@@ -352,9 +351,9 @@ if st.session_state.get("show_intro_info", True):
       2. inside one intermediate folder (for example `data/`)
     ```
     zip
-    â”œâ”€ universe.txt
-    â””â”€ data/ (name can vary)
-       â””â”€ Farm/Field/{contour.txt, patterns.txt}
+    |- universe.txt
+    `- data/ (name can vary)
+       `- Farm/Field/{contour.txt, patterns.txt}
     ```
 
     **Exported shp**
@@ -363,10 +362,10 @@ if st.session_state.get("show_intro_info", True):
     - Include full shapefile sidecar files (`.shp`, `.shx`, `.dbf`, `.prj`)
     ```
     zip
-    â”œâ”€ contours
-    |  â””â”€ Field1_contour.shp
-    â””â”€ patterns
-        â””â”€ Field1_patterns.shp
+    |- contours
+    |  `- Field1_contour.shp
+    `- patterns
+       `- Field1_patterns.shp
     ```
     """
     )
@@ -917,7 +916,7 @@ if input_loaded:
                 for item in display_items:
                     rename_btn_key = f"rename_open_{current_key_safe}_{item['id']}"
                     if st.button(
-                        "âœŽ",
+                        "\u270E",
                         key=rename_btn_key,
                         use_container_width=True,
                     ):
@@ -1020,7 +1019,6 @@ if input_loaded:
                 zip_path = create_export_zip_file(export_root)
                 shutil.rmtree(export_root, ignore_errors=True)
                 set_export_bundle_state(zip_path, "current field")
-                mark_field_edit_clean(current_key)
                 st.success("Current field export prepared.")
                 if current_export_report_lines:
                     st.info(
@@ -1099,7 +1097,6 @@ if input_loaded:
                             farm_name,
                             field_name,
                         )
-                        st.session_state.field_edits[key]["dirty"] = False
                         exported_changes += 1
 
                     if exported_changes:

@@ -419,9 +419,6 @@ def export_all_fields(
                 field_name,
             )
 
-            if "field_edits" in st.session_state and key in st.session_state.field_edits:
-                st.session_state.field_edits[key]["dirty"] = False
-
             exported_count += 1
 
     if with_report:
