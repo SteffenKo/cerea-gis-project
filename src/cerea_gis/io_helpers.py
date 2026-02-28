@@ -1,4 +1,4 @@
-import io
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -103,15 +103,15 @@ def resolve_import_root(extract_dir: Path, import_mode: str):
     return extract_dir
 
 
-def create_export_zip_bytes(export_root: Path):
-    mem_file = io.BytesIO()
-    with zipfile.ZipFile(mem_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+def create_export_zip_file(export_root: Path):
+    zip_dir = Path(tempfile.mkdtemp(prefix="cerea_export_zip_"))
+    zip_path = zip_dir / "cerea_export.zip"
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_path in export_root.rglob("*"):
             if file_path.is_file():
                 rel_path = file_path.relative_to(export_root)
                 zf.write(file_path, arcname=str(rel_path))
-    mem_file.seek(0)
-    return mem_file.read()
+    return zip_path
 
 
 def validate_import_structure(import_mode: str, root_path: Path):

@@ -1,5 +1,4 @@
 import hashlib
-import io
 import shutil
 import tempfile
 import time
@@ -11,7 +10,7 @@ from streamlit_folium import st_folium
 from streamlit_sortables import sort_items
 
 from src.cerea_gis.io_helpers import (
-    create_export_zip_bytes,
+    create_export_zip_file,
     export_field,
     get_exported_fields,
     get_farms,
@@ -62,9 +61,7 @@ st.markdown(
 
 
 def prepare_uploaded_root(uploaded_zip):
-    zip_bytes = uploaded_zip.getvalue()
-    zip_hash = hashlib.sha256(zip_bytes).hexdigest()
-    zip_sig = f"{uploaded_zip.name}:{uploaded_zip.size}:{zip_hash}"
+    zip_sig = get_uploaded_zip_signature(uploaded_zip)
 
     previous_sig = st.session_state.get("input_zip_sig")
     if previous_sig != zip_sig:
@@ -73,8 +70,10 @@ def prepare_uploaded_root(uploaded_zip):
             shutil.rmtree(previous_dir, ignore_errors=True)
 
         extract_dir = Path(tempfile.mkdtemp(prefix="cerea_input_"))
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        uploaded_zip.seek(0)
+        with zipfile.ZipFile(uploaded_zip) as zf:
             zf.extractall(extract_dir)
+        uploaded_zip.seek(0)
 
         st.session_state.input_zip_sig = zip_sig
         st.session_state.input_extract_dir = str(extract_dir)
@@ -86,8 +85,7 @@ def prepare_uploaded_root(uploaded_zip):
         st.session_state.pop("backup_reminder_last_field_key", None)
         st.session_state.pop("backup_reminder_last_shown_signature", None)
         st.session_state.pop("backup_reminder_visible_field_key", None)
-        if "export_bundle" in st.session_state:
-            del st.session_state["export_bundle"]
+        clear_export_bundle_state()
         clear_all_track_input_state()
 
     return Path(st.session_state.input_extract_dir)
@@ -108,8 +106,44 @@ def clear_uploaded_root_state():
     st.session_state.pop("backup_reminder_last_field_key", None)
     st.session_state.pop("backup_reminder_last_shown_signature", None)
     st.session_state.pop("backup_reminder_visible_field_key", None)
-    st.session_state.pop("export_bundle", None)
+    clear_export_bundle_state()
     clear_all_track_input_state()
+
+
+def get_uploaded_zip_signature(uploaded_zip):
+    hasher = hashlib.sha256()
+    uploaded_zip.seek(0)
+    while True:
+        chunk = uploaded_zip.read(1024 * 1024)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    uploaded_zip.seek(0)
+    return f"{uploaded_zip.name}:{uploaded_zip.size}:{hasher.hexdigest()}"
+
+
+def clear_export_bundle_state():
+    bundle = st.session_state.pop("export_bundle", None)
+    if not bundle:
+        return
+
+    bundle_path = bundle.get("path")
+    if not bundle_path:
+        return
+
+    zip_path = Path(bundle_path)
+    zip_parent = zip_path.parent
+    zip_path.unlink(missing_ok=True)
+    if zip_parent.exists():
+        shutil.rmtree(zip_parent, ignore_errors=True)
+
+
+def set_export_bundle_state(zip_path: Path, label: str):
+    clear_export_bundle_state()
+    st.session_state.export_bundle = {
+        "path": str(zip_path),
+        "label": label,
+    }
 
 
 def delete_track_from_field_state(field_state_key: str, track_id: int):
@@ -955,12 +989,9 @@ if uploaded_input_zip is not None:
                     selected_farm,
                     selected_field,
                 )
-                zip_bytes = create_export_zip_bytes(export_root)
+                zip_path = create_export_zip_file(export_root)
                 shutil.rmtree(export_root, ignore_errors=True)
-                st.session_state.export_bundle = {
-                    "bytes": zip_bytes,
-                    "label": "current field",
-                }
+                set_export_bundle_state(zip_path, "current field")
                 current_state["dirty"] = False
                 st.success("Current field export prepared.")
                 if current_export_report_lines:
@@ -982,12 +1013,9 @@ if uploaded_input_zip is not None:
                     center_y,
                     with_report=True,
                 )
-                zip_bytes = create_export_zip_bytes(export_root)
+                zip_path = create_export_zip_file(export_root)
                 shutil.rmtree(export_root, ignore_errors=True)
-                st.session_state.export_bundle = {
-                    "bytes": zip_bytes,
-                    "label": "all fields",
-                }
+                set_export_bundle_state(zip_path, "all fields")
                 st.session_state["last_full_backup_export_ts"] = time.time()
                 st.success(f"Prepared export for {exported_count} field(s).")
                 if export_report_lines:
@@ -1040,12 +1068,9 @@ if uploaded_input_zip is not None:
                         exported_changes += 1
 
                     if exported_changes:
-                        zip_bytes = create_export_zip_bytes(export_root)
+                        zip_path = create_export_zip_file(export_root)
                         shutil.rmtree(export_root, ignore_errors=True)
-                        st.session_state.export_bundle = {
-                            "bytes": zip_bytes,
-                            "label": "all changes",
-                        }
+                        set_export_bundle_state(zip_path, "all changes")
                         st.success(f"Prepared export for {exported_changes} changed field(s).")
                         if changes_export_report_lines:
                             st.info(
@@ -1060,6 +1085,12 @@ if uploaded_input_zip is not None:
 
         bundle = st.session_state.get("export_bundle")
         if bundle:
+            zip_path = Path(bundle.get("path", ""))
+            if not zip_path.exists():
+                clear_export_bundle_state()
+                st.warning("Prepared export file not found. Please prepare export again.")
+                st.stop()
+
             st.caption(
                 "Edit the export zip name below. Press Enter to apply the name for download/export."
             )
@@ -1076,12 +1107,13 @@ if uploaded_input_zip is not None:
                 download_name = export_zip_name or "cerea_export.zip"
                 if not download_name.lower().endswith(".zip"):
                     download_name = f"{download_name}.zip"
-                st.download_button(
-                    label=f"Download {bundle['label']} zip",
-                    data=bundle["bytes"],
-                    file_name=download_name,
-                    mime="application/zip",
-                    use_container_width=True,
-                )
+                with zip_path.open("rb") as zip_file:
+                    st.download_button(
+                        label=f"Download {bundle['label']} zip",
+                        data=zip_file,
+                        file_name=download_name,
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
 else:
     st.info("Upload a zip file to start.")

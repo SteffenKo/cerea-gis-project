@@ -13,7 +13,6 @@ from src.cerea_gis.io_helpers import (
 from src.cerea_gis.patterns import parse_patterns
 
 
-@st.cache_data
 def load_field_data(contour_file, patterns_file, center_x, center_y, return_report=False):
     polygon = None
     notes = []
@@ -41,7 +40,6 @@ def load_field_data(contour_file, patterns_file, center_x, center_y, return_repo
     return polygon, line_items
 
 
-@st.cache_data
 def load_field_data_from_shapefiles(contour_shp, patterns_shp, return_report=False):
     polygon = None
     notes = []
