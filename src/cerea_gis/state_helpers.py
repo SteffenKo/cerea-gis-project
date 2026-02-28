@@ -87,6 +87,166 @@ def load_field_data_from_shapefiles(contour_shp, patterns_shp, return_report=Fal
     return polygon, line_items
 
 
+def _get_field_edits():
+    if "field_edits" not in st.session_state:
+        st.session_state.field_edits = {}
+    return st.session_state.field_edits
+
+
+def _normalize_edit_state(raw_state):
+    state = raw_state if isinstance(raw_state, dict) else {}
+    # Drop legacy heavy keys if they are still present in an old session.
+    state.pop("polygon", None)
+    state.pop("line_items", None)
+
+    order = state.get("order")
+    if order is not None:
+        normalized_order = []
+        for track_id in order:
+            try:
+                normalized_order.append(int(track_id))
+            except (TypeError, ValueError):
+                continue
+        state["order"] = normalized_order
+    else:
+        state["order"] = None
+
+    renamed = state.get("renamed")
+    if isinstance(renamed, dict):
+        normalized_renamed = {}
+        for track_id, name in renamed.items():
+            try:
+                normalized_renamed[int(track_id)] = str(name)
+            except (TypeError, ValueError):
+                continue
+        state["renamed"] = normalized_renamed
+    else:
+        state["renamed"] = {}
+
+    deleted_ids = state.get("deleted_ids")
+    if isinstance(deleted_ids, (list, tuple, set)):
+        normalized_deleted = []
+        seen = set()
+        for track_id in deleted_ids:
+            try:
+                track_id_int = int(track_id)
+            except (TypeError, ValueError):
+                continue
+            if track_id_int not in seen:
+                seen.add(track_id_int)
+                normalized_deleted.append(track_id_int)
+        state["deleted_ids"] = normalized_deleted
+    else:
+        state["deleted_ids"] = []
+
+    state["dirty"] = bool(state.get("dirty", False))
+    return state
+
+
+def _empty_edit_state():
+    return {"order": None, "renamed": {}, "deleted_ids": [], "dirty": False}
+
+
+def _get_or_create_edit_state(key: str):
+    field_edits = _get_field_edits()
+    state = _normalize_edit_state(field_edits.get(key, {}))
+    field_edits[key] = state
+    return state
+
+
+def _apply_line_item_edits(line_items, edit_state):
+    if not line_items:
+        return []
+
+    deleted_ids = set(edit_state.get("deleted_ids", []))
+    renamed = edit_state.get("renamed", {})
+    requested_order = edit_state.get("order")
+
+    items_by_id = {int(item["id"]): item for item in line_items}
+    base_ids = [int(item["id"]) for item in line_items]
+
+    ordered_ids = []
+    seen = set()
+
+    if requested_order:
+        for track_id in requested_order:
+            if track_id in seen:
+                continue
+            if track_id in items_by_id:
+                ordered_ids.append(track_id)
+                seen.add(track_id)
+
+    for track_id in base_ids:
+        if track_id in seen:
+            continue
+        ordered_ids.append(track_id)
+        seen.add(track_id)
+
+    edited_items = []
+    for track_id in ordered_ids:
+        if track_id in deleted_ids:
+            continue
+        item = items_by_id.get(track_id)
+        if item is None:
+            continue
+        edited_items.append(
+            {
+                "id": track_id,
+                "name": renamed.get(track_id, item["name"]),
+                "geometry": item["geometry"],
+            }
+        )
+    return edited_items
+
+
+def delete_track_edit(key: str, track_id: int):
+    state = _get_or_create_edit_state(key)
+    track_id = int(track_id)
+
+    if track_id in state["deleted_ids"]:
+        return False
+
+    state["deleted_ids"].append(track_id)
+    state["renamed"].pop(track_id, None)
+    if state["order"] is not None:
+        state["order"] = [tid for tid in state["order"] if tid != track_id]
+    state["dirty"] = True
+    return True
+
+
+def rename_track_edit(key: str, track_id: int, new_name: str):
+    state = _get_or_create_edit_state(key)
+    track_id = int(track_id)
+    state["renamed"][track_id] = str(new_name)
+    state["dirty"] = True
+
+
+def set_track_order_edit(key: str, ordered_track_ids):
+    state = _get_or_create_edit_state(key)
+    normalized = []
+    seen = set()
+    for track_id in ordered_track_ids:
+        try:
+            track_id_int = int(track_id)
+        except (TypeError, ValueError):
+            continue
+        if track_id_int in seen:
+            continue
+        seen.add(track_id_int)
+        normalized.append(track_id_int)
+
+    state["order"] = normalized
+    state["dirty"] = True
+
+
+def mark_field_edit_clean(key: str):
+    field_edits = _get_field_edits()
+    state = field_edits.get(key)
+    if not isinstance(state, dict):
+        return
+    state["dirty"] = False
+
+
 def field_key(import_mode: str, farm_name: str, field_name: str):
     return f"{import_mode}::{farm_name}::{field_name}"
 
@@ -133,30 +293,6 @@ def clear_all_track_input_state():
 def ensure_field_state(
     key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
 ):
-    if "field_edits" not in st.session_state:
-        st.session_state.field_edits = {}
-
-    if key not in st.session_state.field_edits:
-        if import_mode == "Cerea txt":
-            polygon, line_items = load_field_data(
-                contour_source, patterns_source, center_x, center_y
-            )
-        else:
-            polygon, line_items = load_field_data_from_shapefiles(
-                contour_source, patterns_source
-            )
-        st.session_state.field_edits[key] = {
-            "polygon": polygon,
-            "line_items": line_items,
-            "dirty": False,
-        }
-
-    return st.session_state.field_edits[key]
-
-
-def reset_field_state(
-    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
-):
     if import_mode == "Cerea txt":
         polygon, line_items = load_field_data(
             contour_source, patterns_source, center_x, center_y
@@ -165,11 +301,28 @@ def reset_field_state(
         polygon, line_items = load_field_data_from_shapefiles(
             contour_source, patterns_source
         )
-    st.session_state.field_edits[key] = {
+
+    field_edits = _get_field_edits()
+    raw_state = field_edits.get(key)
+    if isinstance(raw_state, dict):
+        edit_state = _normalize_edit_state(raw_state)
+        field_edits[key] = edit_state
+    else:
+        edit_state = _empty_edit_state()
+    edited_line_items = _apply_line_item_edits(line_items, edit_state)
+    return {
         "polygon": polygon,
-        "line_items": line_items,
-        "dirty": False,
+        "line_items": edited_line_items,
+        "dirty": edit_state.get("dirty", False),
     }
+
+
+def reset_field_state(
+    key, import_mode, contour_source, patterns_source, center_x=None, center_y=None
+):
+    if "field_edits" not in st.session_state:
+        st.session_state.field_edits = {}
+    st.session_state.field_edits.pop(key, None)
 
 
 def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None):
@@ -188,9 +341,7 @@ def reset_all_field_states(import_mode, root_path, center_x=None, center_y=None)
         )
         source_exists = contour_source.exists() or patterns_source.exists()
         if source_exists:
-            reset_field_state(
-                key, import_mode, contour_source, patterns_source, center_x, center_y
-            )
+            st.session_state.field_edits.pop(key, None)
             reset_count += 1
 
     return reset_count
@@ -221,28 +372,20 @@ def export_all_fields(
 
             key = field_key(import_mode, farm_dir.name, field_name)
             field_notes = []
-            loaded_from_state = False
-
-            if "field_edits" in st.session_state and key in st.session_state.field_edits:
-                state = st.session_state.field_edits[key]
-                polygon = state["polygon"]
-                line_items = state["line_items"]
-                loaded_from_state = True
+            if import_mode == "Cerea txt":
+                polygon, line_items, field_notes = load_field_data(
+                    contour_source,
+                    patterns_source,
+                    center_x,
+                    center_y,
+                    return_report=True,
+                )
             else:
-                if import_mode == "Cerea txt":
-                    polygon, line_items, field_notes = load_field_data(
-                        contour_source,
-                        patterns_source,
-                        center_x,
-                        center_y,
-                        return_report=True,
-                    )
-                else:
-                    polygon, line_items, field_notes = load_field_data_from_shapefiles(
-                        contour_source,
-                        patterns_source,
-                        return_report=True,
-                    )
+                polygon, line_items, field_notes = load_field_data_from_shapefiles(
+                    contour_source,
+                    patterns_source,
+                    return_report=True,
+                )
 
             if not has_contour_source or not has_patterns_source:
                 missing_parts = []
@@ -257,7 +400,12 @@ def export_all_fields(
             for note in field_notes:
                 report_lines.append(f"- Partial {field_label}: {note}")
 
-            if not loaded_from_state and polygon is None and not line_items:
+            if "field_edits" in st.session_state and key in st.session_state.field_edits:
+                edit_state = _normalize_edit_state(st.session_state.field_edits[key])
+                st.session_state.field_edits[key] = edit_state
+                line_items = _apply_line_item_edits(line_items, edit_state)
+
+            if polygon is None and not line_items:
                 report_lines.append(
                     f"- Skipped {field_label}: no usable contour or patterns data."
                 )

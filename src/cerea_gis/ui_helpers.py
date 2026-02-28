@@ -16,8 +16,6 @@ def create_map(polygon, ordered_line_items):
         [
             {
                 "order": i + 1,
-                "id": item["id"],
-                "name": item["name"],
                 "geometry": item["geometry"],
             }
             for i, item in enumerate(ordered_line_items)
@@ -45,7 +43,6 @@ def create_map(polygon, ordered_line_items):
     for _, row in gdf_lines.iterrows():
         folium.GeoJson(
             row["geometry"],
-            tooltip=f"{row['order']} - {row['name']}",
             style_function=lambda _: {
                 "color": "blue",
                 "weight": 3,

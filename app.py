@@ -1,5 +1,4 @@
-import hashlib
-import shutil
+﻿import shutil
 import tempfile
 import time
 import zipfile
@@ -24,12 +23,16 @@ from src.cerea_gis.io_helpers import (
 from src.cerea_gis.state_helpers import (
     clear_all_track_input_state,
     clear_track_input_state,
+    delete_track_edit,
     ensure_field_state,
     export_all_fields,
     field_key,
+    mark_field_edit_clean,
     parse_field_key,
+    rename_track_edit,
     reset_all_field_states,
     reset_field_state,
+    set_track_order_edit,
 )
 from src.cerea_gis.ui_helpers import create_map, safe_widget_suffix
 from src.cerea_gis.universe import read_center
@@ -62,6 +65,8 @@ st.markdown(
 
 def prepare_uploaded_root(uploaded_zip):
     zip_sig = get_uploaded_zip_signature(uploaded_zip)
+    zip_name = uploaded_zip.name or ""
+    zip_size = int(uploaded_zip.size or 0)
 
     previous_sig = st.session_state.get("input_zip_sig")
     if previous_sig != zip_sig:
@@ -76,6 +81,8 @@ def prepare_uploaded_root(uploaded_zip):
         uploaded_zip.seek(0)
 
         st.session_state.input_zip_sig = zip_sig
+        st.session_state.input_zip_name = zip_name
+        st.session_state.input_zip_size = zip_size
         st.session_state.input_extract_dir = str(extract_dir)
         st.session_state.field_edits = {}
         st.session_state.selected_field_by_farm = {}
@@ -85,6 +92,7 @@ def prepare_uploaded_root(uploaded_zip):
         st.session_state.pop("backup_reminder_last_field_key", None)
         st.session_state.pop("backup_reminder_last_shown_signature", None)
         st.session_state.pop("backup_reminder_visible_field_key", None)
+        st.session_state.pop("clear_export_bundle_next_run", None)
         clear_export_bundle_state()
         clear_all_track_input_state()
 
@@ -97,7 +105,10 @@ def clear_uploaded_root_state():
         shutil.rmtree(previous_dir, ignore_errors=True)
 
     st.session_state.pop("input_zip_sig", None)
+    st.session_state.pop("input_zip_name", None)
+    st.session_state.pop("input_zip_size", None)
     st.session_state.pop("input_extract_dir", None)
+    st.session_state.pop("import_zip_uploader", None)
     st.session_state.field_edits = {}
     st.session_state.selected_field_by_farm = {}
     st.session_state.pop("reset_field_target", None)
@@ -106,20 +117,22 @@ def clear_uploaded_root_state():
     st.session_state.pop("backup_reminder_last_field_key", None)
     st.session_state.pop("backup_reminder_last_shown_signature", None)
     st.session_state.pop("backup_reminder_visible_field_key", None)
+    st.session_state.pop("clear_export_bundle_next_run", None)
     clear_export_bundle_state()
     clear_all_track_input_state()
 
 
 def get_uploaded_zip_signature(uploaded_zip):
-    hasher = hashlib.sha256()
-    uploaded_zip.seek(0)
-    while True:
-        chunk = uploaded_zip.read(1024 * 1024)
-        if not chunk:
-            break
-        hasher.update(chunk)
-    uploaded_zip.seek(0)
-    return f"{uploaded_zip.name}:{uploaded_zip.size}:{hasher.hexdigest()}"
+    file_id = getattr(uploaded_zip, "file_id", None)
+    if file_id is None:
+        file_id = getattr(uploaded_zip, "id", None)
+
+    name = uploaded_zip.name or ""
+    size = int(uploaded_zip.size or 0)
+
+    if file_id is not None:
+        return f"{file_id}:{name}:{size}"
+    return f"{name}:{size}"
 
 
 def clear_export_bundle_state():
@@ -147,21 +160,20 @@ def set_export_bundle_state(zip_path: Path, label: str):
 
 
 def delete_track_from_field_state(field_state_key: str, track_id: int):
-    field_edits = st.session_state.get("field_edits", {})
-    state = field_edits.get(field_state_key)
-    if not state:
+    changed = delete_track_edit(field_state_key, track_id)
+    if not changed:
         return
 
-    original_len = len(state.get("line_items", []))
-    state["line_items"] = [
-        item for item in state.get("line_items", []) if item.get("id") != track_id
-    ]
-    if len(state["line_items"]) == original_len:
-        return
-
-    state["dirty"] = True
     clear_track_input_state(field_state_key)
     st.session_state["track_delete_notice"] = "Track deleted."
+
+
+def set_selected_field_for_farm(farm_session_key: str, field_name: str):
+    st.session_state.selected_field_by_farm[farm_session_key] = field_name
+
+
+if st.session_state.pop("clear_export_bundle_next_run", False):
+    clear_export_bundle_state()
 
 
 def build_field_export_report_lines(
@@ -256,28 +268,9 @@ def get_backup_reminder_signature(
 
 if hasattr(st, "dialog"):
     @st.dialog("Rename track")
-    def show_rename_dialog(field_state_key: str, track_id: int):
-        state = st.session_state.get("field_edits", {}).get(field_state_key)
-        if not state:
-            st.warning("Field state not available.")
-            if st.button("Close", use_container_width=True):
-                st.session_state.pop("rename_target", None)
-                st.rerun()
-            return
-
-        track = next(
-            (item for item in state["line_items"] if item["id"] == track_id),
-            None,
-        )
-        if not track:
-            st.warning("Track not found.")
-            if st.button("Close", use_container_width=True):
-                st.session_state.pop("rename_target", None)
-                st.rerun()
-            return
-
+    def show_rename_dialog(field_state_key: str, track_id: int, current_name: str):
         input_key = f"rename_dialog_{safe_widget_suffix(field_state_key)}_{track_id}"
-        new_name = st.text_input("New name", value=track["name"], key=input_key)
+        new_name = st.text_input("New name", value=current_name, key=input_key)
 
         apply_col, cancel_col = st.columns(2)
         with apply_col:
@@ -286,13 +279,7 @@ if hasattr(st, "dialog"):
                 if not cleaned_name:
                     st.warning("Please enter a non-empty name.")
                 else:
-                    state["line_items"] = [
-                        {**item, "name": cleaned_name}
-                        if item["id"] == track_id
-                        else item
-                        for item in state["line_items"]
-                    ]
-                    state["dirty"] = True
+                    rename_track_edit(field_state_key, track_id, cleaned_name)
                     st.session_state.pop("rename_target", None)
                     st.rerun()
         with cancel_col:
@@ -365,9 +352,9 @@ if st.session_state.get("show_intro_info", True):
       2. inside one intermediate folder (for example `data/`)
     ```
     zip
-    ├─ universe.txt
-    └─ data/ (name can vary)
-       └─ Farm/Field/{contour.txt, patterns.txt}
+    â”œâ”€ universe.txt
+    â””â”€ data/ (name can vary)
+       â””â”€ Farm/Field/{contour.txt, patterns.txt}
     ```
 
     **Exported shp**
@@ -376,10 +363,10 @@ if st.session_state.get("show_intro_info", True):
     - Include full shapefile sidecar files (`.shp`, `.shx`, `.dbf`, `.prj`)
     ```
     zip
-    ├─ contours
-    |  └─ Field1_contour.shp
-    └─ patterns
-        └─ Field1_patterns.shp
+    â”œâ”€ contours
+    |  â””â”€ Field1_contour.shp
+    â””â”€ patterns
+        â””â”€ Field1_patterns.shp
     ```
     """
     )
@@ -390,27 +377,61 @@ with mode_col:
     import_mode = st.selectbox("Import mode", ["Cerea txt", "Exported shp"])
 
 with input_col:
-    uploaded_input_zip = st.file_uploader(
-        "Import data zip",
-        type=["zip"],
-        accept_multiple_files=False,
-    )
+    has_loaded_input = bool(st.session_state.get("input_extract_dir"))
+    if has_loaded_input:
+        loaded_name = st.session_state.get("input_zip_name", "import.zip")
+        loaded_size = int(st.session_state.get("input_zip_size") or 0)
+        size_mib = loaded_size / (1024 * 1024) if loaded_size else 0.0
+        st.caption(f"Loaded zip: `{loaded_name}` ({size_mib:.1f} MiB)")
+        if st.button(
+            "Replace import zip",
+            key="replace_import_zip_btn",
+            use_container_width=True,
+        ):
+            clear_uploaded_root_state()
+            st.session_state.show_intro_info = True
+            st.rerun()
+    else:
+        with st.form("load_import_zip_form", clear_on_submit=False):
+            uploaded_input_zip = st.file_uploader(
+                "Import data zip",
+                type=["zip"],
+                accept_multiple_files=False,
+                key="import_zip_uploader",
+            )
+            load_import_zip_clicked = st.form_submit_button(
+                "Load zip",
+                use_container_width=True,
+            )
+        if load_import_zip_clicked:
+            if uploaded_input_zip is None:
+                st.warning("Please choose a zip file first.")
+            else:
+                prepare_uploaded_root(uploaded_input_zip)
+                st.session_state.pop("import_zip_uploader", None)
+                st.session_state.show_intro_info = False
+                st.rerun()
 
-if uploaded_input_zip is None:
-    intro_was_hidden = not st.session_state.get("show_intro_info", True)
-    if st.session_state.get("input_extract_dir"):
-        clear_uploaded_root_state()
+input_loaded = bool(st.session_state.get("input_extract_dir"))
+if not input_loaded:
     st.session_state.show_intro_info = True
-    if intro_was_hidden:
-        st.rerun()
 
 with check_col:
-    st.caption("Input structure check appears after upload.")
+    if input_loaded:
+        st.caption("Input structure check for loaded zip.")
+    else:
+        st.caption("Input structure check appears after loading zip.")
+
 
 st.divider()
 
-if uploaded_input_zip is not None:
-    extracted_root = prepare_uploaded_root(uploaded_input_zip)
+if input_loaded:
+    extracted_root = Path(st.session_state.input_extract_dir)
+    if not extracted_root.exists():
+        clear_uploaded_root_state()
+        st.warning("Loaded import data was removed. Please load the zip again.")
+        st.stop()
+
     cerea_root = resolve_import_root(extracted_root, import_mode)
 
     validation = validate_import_structure(import_mode, cerea_root)
@@ -432,14 +453,11 @@ if uploaded_input_zip is not None:
                     st.write(f"- {warn}")
 
     if validation["issues"]:
-        if not st.session_state.get("show_intro_info", True):
-            st.session_state.show_intro_info = True
-            st.rerun()
+        st.session_state.show_intro_info = True
         st.stop()
 
     if st.session_state.get("show_intro_info", True):
         st.session_state.show_intro_info = False
-        st.rerun()
 
     center_x = None
     center_y = None
@@ -520,14 +538,14 @@ if uploaded_input_zip is not None:
             if is_dirty and not is_selected:
                 highlighted_button_keys.append(btn_key)
 
-            if st.button(
+            st.button(
                 field_name,
                 key=btn_key,
                 use_container_width=True,
                 type="primary" if is_selected else "secondary",
-            ):
-                st.session_state.selected_field_by_farm[farm_session_key] = field_name
-                selected_field = field_name
+                on_click=set_selected_field_for_farm,
+                args=(farm_session_key, field_name),
+            )
 
         if highlighted_button_keys:
             style_rules = []
@@ -798,7 +816,10 @@ if uploaded_input_zip is not None:
                     ordered_line_items = resolved_items
 
             display_items = ordered_line_items
-            folium_map = create_map(polygon, display_items) if display_items else None
+            if display_items:
+                folium_map = create_map(polygon, display_items)
+            else:
+                folium_map = None
 
             style_rules = []
             for item in display_items:
@@ -896,7 +917,7 @@ if uploaded_input_zip is not None:
                 for item in display_items:
                     rename_btn_key = f"rename_open_{current_key_safe}_{item['id']}"
                     if st.button(
-                        "✎",
+                        "âœŽ",
                         key=rename_btn_key,
                         use_container_width=True,
                     ):
@@ -913,8 +934,9 @@ if uploaded_input_zip is not None:
                 if folium_map is not None:
                     st_folium(
                         folium_map,
-                        key=f"track_map_{current_key_safe}",
+                        key="track_map_main",
                         height=map_height,
+                        returned_objects=[],
                         use_container_width=True,
                     )
 
@@ -923,9 +945,10 @@ if uploaded_input_zip is not None:
                 st.success(delete_notice)
 
             if [i["id"] for i in display_items] != [i["id"] for i in original_line_items]:
-                current_state["line_items"] = display_items
-                current_state["dirty"] = True
-                line_items = current_state["line_items"]
+                set_track_order_edit(
+                    current_key, [int(item["id"]) for item in display_items]
+                )
+                line_items = display_items
 
             rename_target = st.session_state.get("rename_target")
             if (
@@ -933,7 +956,12 @@ if uploaded_input_zip is not None:
                 and rename_target.get("field_key") == current_key
                 and hasattr(st, "dialog")
             ):
-                show_rename_dialog(current_key, int(rename_target["track_id"]))
+                track_id = int(rename_target["track_id"])
+                track = next((item for item in line_items if item["id"] == track_id), None)
+                if track is None:
+                    st.session_state.pop("rename_target", None)
+                else:
+                    show_rename_dialog(current_key, track_id, track["name"])
 
         dirty_count = get_dirty_field_count_for_mode(import_mode)
         last_backup_ts = st.session_state.get("last_full_backup_export_ts")
@@ -992,7 +1020,7 @@ if uploaded_input_zip is not None:
                 zip_path = create_export_zip_file(export_root)
                 shutil.rmtree(export_root, ignore_errors=True)
                 set_export_bundle_state(zip_path, "current field")
-                current_state["dirty"] = False
+                mark_field_edit_clean(current_key)
                 st.success("Current field export prepared.")
                 if current_export_report_lines:
                     st.info(
@@ -1043,9 +1071,16 @@ if uploaded_input_zip is not None:
                         key_mode, farm_name, field_name = parse_field_key(key)
                         if key_mode != import_mode:
                             continue
-                        state = st.session_state.field_edits[key]
                         contour_source, patterns_source = get_field_sources(
                             import_mode, cerea_root, farm_name, field_name
+                        )
+                        current_field_state = ensure_field_state(
+                            key,
+                            import_mode,
+                            contour_source,
+                            patterns_source,
+                            center_x,
+                            center_y,
                         )
                         changes_export_report_lines.extend(
                             build_field_export_report_lines(
@@ -1054,17 +1089,17 @@ if uploaded_input_zip is not None:
                                 field_name,
                                 contour_source,
                                 patterns_source,
-                                state,
+                                current_field_state,
                             )
                         )
                         export_field(
-                            state["polygon"],
-                            state["line_items"],
+                            current_field_state["polygon"],
+                            current_field_state["line_items"],
                             export_root,
                             farm_name,
                             field_name,
                         )
-                        state["dirty"] = False
+                        st.session_state.field_edits[key]["dirty"] = False
                         exported_changes += 1
 
                     if exported_changes:
@@ -1108,12 +1143,14 @@ if uploaded_input_zip is not None:
                 if not download_name.lower().endswith(".zip"):
                     download_name = f"{download_name}.zip"
                 with zip_path.open("rb") as zip_file:
-                    st.download_button(
+                    download_clicked = st.download_button(
                         label=f"Download {bundle['label']} zip",
                         data=zip_file,
                         file_name=download_name,
                         mime="application/zip",
                         use_container_width=True,
                     )
+                if download_clicked:
+                    st.session_state["clear_export_bundle_next_run"] = True
 else:
     st.info("Upload a zip file to start.")
